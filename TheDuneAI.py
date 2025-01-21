@@ -4,6 +4,8 @@ import keras
 import cv2
 import time
 import os
+import shap
+import matplotlib.pyplot as plt
 
 # Import pipeline functions
 import lung_extraction_funcs as le
@@ -23,12 +25,11 @@ class ContourPilot:
         else:
             self.Patient_dict = le.parse_dataset(data_path, img_only=True)
         self.Patients_gen = generator.Patient_data_generator(self.Patient_dict, predict=True, batch_size=1,
-                                                                image_size=512, shuffle=True,
-                                                                use_window=True, window_params=[1500, -600],
-                                                                resample_int_val=True, resampling_step=25,
-                                                                # 25
-                                                                extract_lungs=True, size_eval=False,
-                                                                verbosity=verbosity, reshape=True, img_only=True)
+                                                             image_size=512, shuffle=True,
+                                                             use_window=True, window_params=[1500, -600],
+                                                             resample_int_val=True, resampling_step=25,
+                                                             extract_lungs=True, size_eval=False,
+                                                             verbosity=verbosity, reshape=True, img_only=True)
         self.Output_path = output_path
 
     def __load_model__(self, model_path):
@@ -77,6 +78,39 @@ class ContourPilot:
                 params = params[0]
                 img = np.squeeze(img)
 
+                if len(img.shape) != 3 or img.shape[1:] != (512, 512):
+                    raise ValueError(f"Unexpected image shape: {img.shape}. Expected (n_slices, 512, 512).")
+
+                for slice_idx in range(img.shape[0]):
+                    slice_img = img[slice_idx]
+                    if len(slice_img.shape) == 2:
+                        slice_img = np.expand_dims(slice_img, axis=-1)  # Add channel dimension
+
+                    if slice_img.shape != (512, 512, 1):
+                        raise ValueError(f"Unexpected reshaped slice shape: {slice_img.shape}. Expected (512, 512, 1).")
+
+                    slice_img_batched = np.expand_dims(slice_img, axis=0)  # Add batch dimension
+
+                    # Validate batch shape
+                    if slice_img_batched.shape != (1, 512, 512, 1):
+                        raise ValueError(f"Batch shape mismatch: {slice_img_batched.shape}")
+
+                    # Configure SHAP masker and explainer
+                    masker = shap.maskers.Image(np.zeros_like(slice_img), shape=(512, 512, 1))
+                    explainer = shap.Explainer(self.model1, masker)
+
+                    # Generate SHAP values
+                    shap_values = explainer(slice_img_batched).reshape((1, 512, 512, 1))
+
+                    # Plot and save SHAP values for this slice
+                    plt.figure()
+                    shap.plots.image(shap_values[0], show=False)
+                    output_dir = os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)')
+                    os.makedirs(output_dir, exist_ok=True)
+                    plt.savefig(os.path.join(output_dir, f"slice_{slice_idx}_shap_plot.png"))
+                    plt.close()
+
+                # Save segmentation results
                 predicted_array = self.__generate_segmentation__(img, params)
 
                 if not os.path.exists(os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)')):

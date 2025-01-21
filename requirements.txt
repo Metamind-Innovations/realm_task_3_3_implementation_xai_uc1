@@ -20,3 +20,5 @@ tqdm
 xlrd
 openpyxl
 statannot
+shap
+matplotlib
