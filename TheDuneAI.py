@@ -6,6 +6,9 @@ import time
 import os
 import shap
 import matplotlib.pyplot as plt
+import skimage.segmentation
+import tensorflow as tf
+import shutil
 
 # Import pipeline functions
 import lung_extraction_funcs as le
@@ -70,62 +73,119 @@ class ContourPilot:
         return predicted_array
 
     def segment(self):
-        if self.model1 and self.Patient_dict and self.Output_path:
-            count = 0
-            for img, _, filename, params in tqdm(self.Patients_gen, desc='Progress'):
+        if not (self.model1 and self.Patient_dict and self.Output_path):
+            return 0
 
-                filename = filename[0]
-                params = params[0]
-                img = np.squeeze(img)
+        # Configure GPU if available
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            try:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+            except RuntimeError:
+                pass
 
-                if len(img.shape) != 3 or img.shape[1:] != (512, 512):
-                    raise ValueError(f"Unexpected image shape: {img.shape}. Expected (n_slices, 512, 512).")
+        # Precompile model inference function
+        @tf.function(reduce_retracing=True)
+        def tf_predict(batch):
+            return self.model1(batch, training=False)
 
-                for slice_idx in range(img.shape[0]):
-                    slice_img = img[slice_idx]
-                    if len(slice_img.shape) == 2:
-                        slice_img = np.expand_dims(slice_img, axis=-1)  # Add channel dimension
+        for img, _, filename, params in tqdm(self.Patients_gen, desc='Patients'):
+            filename = filename[0]
+            params = params[0]
+            img = np.squeeze(img)
 
-                    if slice_img.shape != (512, 512, 1):
-                        raise ValueError(f"Unexpected reshaped slice shape: {slice_img.shape}. Expected (512, 512, 1).")
+            if len(img.shape) != 3 or img.shape[1:] != (512, 512):
+                raise ValueError(f"Unexpected image shape: {img.shape}. Expected (n_slices, 512, 512).")
 
-                    slice_img_batched = np.expand_dims(slice_img, axis=0)  # Add batch dimension
+            # Create output directory once per patient
+            base_name = os.path.basename(filename).split('.')[0]
+            output_dir = os.path.join(self.Output_path, f"{base_name}_(DL)")
+            os.makedirs(output_dir, exist_ok=True)
 
-                    # Validate batch shape
-                    if slice_img_batched.shape != (1, 512, 512, 1):
-                        raise ValueError(f"Batch shape mismatch: {slice_img_batched.shape}")
+            # Process slices
+            for slice_idx in range(2):
+                try:
+                    slice_2d = np.squeeze(img[slice_idx])
+                    if np.max(slice_2d) < -700:
+                        continue
 
-                    # Configure SHAP masker and explainer
-                    masker = shap.maskers.Image(np.zeros_like(slice_img), shape=(512, 512, 1))
-                    explainer = shap.Explainer(self.model1, masker)
+                    # Superpixel generation
+                    segments = skimage.segmentation.slic(
+                        slice_2d,
+                        n_segments=7,
+                        compactness=25,
+                        sigma=1,
+                        start_label=0,
+                        channel_axis=None
+                    )
+                    n_segments = segments.max() + 1
 
-                    # Generate SHAP values
-                    shap_values = explainer(slice_img_batched).reshape((1, 512, 512, 1))
+                    # Vectorized prediction function
+                    def predict_fn(masks):
+                        batch = np.zeros((len(masks), 512, 512, 1), dtype=np.float32)
+                        for i in range(n_segments):
+                            batch[:, segments == i, 0] = masks[:, i:i + 1] * slice_2d[segments == i]
+                        return tf_predict(batch).numpy().mean(axis=(1, 2, 3)).reshape(-1, 1)
 
-                    # Plot and save SHAP values for this slice
-                    plt.figure()
-                    shap.plots.image(shap_values[0], show=False)
-                    output_dir = os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)')
-                    os.makedirs(output_dir, exist_ok=True)
-                    plt.savefig(os.path.join(output_dir, f"slice_{slice_idx}_shap_plot.png"))
+                    # SHAP explanation
+                    explainer = shap.KernelExplainer(
+                        predict_fn,
+                        data=np.zeros((1, n_segments)),
+                        link="identity",
+                        l1_reg=f"num_features({min(n_segments, 4)})"
+                    )
+
+                    shap_values = explainer.shap_values(
+                        np.ones((1, n_segments)),
+                        nsamples=80,
+                        silent=True
+                    )
+
+                    # Process SHAP values
+                    if isinstance(shap_values, list):
+                        if len(shap_values) == 2:
+                            shap_values = shap_values[1]
+                        else:
+                            shap_values = shap_values[0]
+
+                    shap_values = np.array(shap_values).squeeze()
+
+                    if shap_values.size != n_segments:
+                        raise ValueError(f"SHAP values mismatch: {shap_values.size} vs {n_segments}")
+
+                    # Create heatmap
+                    shap_heatmap = np.zeros_like(slice_2d, dtype=np.float32)
+                    for i in range(n_segments):
+                        if i < shap_values.size:
+                            shap_heatmap[segments == i] = shap_values[i]
+
+                    # Save visualization
+                    plt.figure(figsize=(10, 10))
+                    plt.imshow(slice_2d, cmap='gray')
+                    plt.imshow(shap_heatmap, alpha=0.4, cmap='jet')
+                    plt.axis('off')
+                    plt.savefig(os.path.join(output_dir, f"slice_{slice_idx}_shap.png"),
+                                bbox_inches='tight', dpi=100)
                     plt.close()
 
-                # Save segmentation results
-                predicted_array = self.__generate_segmentation__(img, params)
+                except Exception as e:
+                    print(f"Error processing slice {slice_idx}: {str(e)}")
+                    continue
 
-                if not os.path.exists(os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)')):
-                    os.makedirs(os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)'))
+            # Segmentation pipeline
+            try:
+                predicted_array = self.__generate_segmentation__(img, params)
 
                 generated_img = sitk.GetImageFromArray(predicted_array)
                 generated_img.SetSpacing(params['original_spacing'])
                 generated_img.SetOrigin(params['img_origin'])
-                sitk.WriteImage(generated_img,
-                                os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)', 'DL_mask.nrrd'))
-                temp_data = sitk.ReadImage(filename)
-                sitk.WriteImage(temp_data,
-                                os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)', 'image.nrrd'))
 
-                if count == len(self.Patients_gen):
-                    return 0
+                sitk.WriteImage(generated_img, os.path.join(output_dir, 'DL_mask.nrrd'))
+                shutil.copy2(filename, os.path.join(output_dir, os.path.basename(filename)))
 
-                count += 1
+            except Exception as e:
+                print(f"Error saving outputs: {str(e)}")
+                raise
+
+        return 0
