@@ -4,11 +4,12 @@ import keras
 import cv2
 import time
 import os
-import shap
 import matplotlib.pyplot as plt
-import skimage.segmentation
-import tensorflow as tf
-import shutil
+from lime import lime_image
+from skimage.segmentation import mark_boundaries
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
 
 # Import pipeline functions
 import lung_extraction_funcs as le
@@ -30,7 +31,7 @@ class ContourPilot:
         self.Patients_gen = generator.Patient_data_generator(self.Patient_dict, predict=True, batch_size=1,
                                                              image_size=512, shuffle=True,
                                                              use_window=True, window_params=[1500, -600],
-                                                             resample_int_val=True, resampling_step=25,
+                                                             resample_int_val=True, resampling_step=25,  # 25
                                                              extract_lungs=True, size_eval=False,
                                                              verbosity=verbosity, reshape=True, img_only=True)
         self.Output_path = output_path
@@ -73,119 +74,103 @@ class ContourPilot:
         return predicted_array
 
     def segment(self):
-        if not (self.model1 and self.Patient_dict and self.Output_path):
-            return 0
+        if self.model1 and self.Patient_dict and self.Output_path:
+            count = 0
+            for img, _, filename, params in tqdm(self.Patients_gen, desc='Progress'):
+                filename = filename[0]
+                params = params[0]
+                img = np.squeeze(img)  # Shape: (slices, 512, 512)
 
-        # Configure GPU if available
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            try:
-                for gpu in gpus:
-                    tf.config.experimental.set_memory_growth(gpu, True)
-            except RuntimeError:
-                pass
-
-        # Precompile model inference function
-        @tf.function(reduce_retracing=True)
-        def tf_predict(batch):
-            return self.model1(batch, training=False)
-
-        for img, _, filename, params in tqdm(self.Patients_gen, desc='Patients'):
-            filename = filename[0]
-            params = params[0]
-            img = np.squeeze(img)
-
-            if len(img.shape) != 3 or img.shape[1:] != (512, 512):
-                raise ValueError(f"Unexpected image shape: {img.shape}. Expected (n_slices, 512, 512).")
-
-            # Create output directory once per patient
-            base_name = os.path.basename(filename).split('.')[0]
-            output_dir = os.path.join(self.Output_path, f"{base_name}_(DL)")
-            os.makedirs(output_dir, exist_ok=True)
-
-            # Process slices
-            for slice_idx in range(2):
-                try:
-                    slice_2d = np.squeeze(img[slice_idx])
-                    if np.max(slice_2d) < -700:
-                        continue
-
-                    # Superpixel generation
-                    segments = skimage.segmentation.slic(
-                        slice_2d,
-                        n_segments=7,
-                        compactness=25,
-                        sigma=1,
-                        start_label=0,
-                        channel_axis=None
-                    )
-                    n_segments = segments.max() + 1
-
-                    # Vectorized prediction function
-                    def predict_fn(masks):
-                        batch = np.zeros((len(masks), 512, 512, 1), dtype=np.float32)
-                        for i in range(n_segments):
-                            batch[:, segments == i, 0] = masks[:, i:i + 1] * slice_2d[segments == i]
-                        return tf_predict(batch).numpy().mean(axis=(1, 2, 3)).reshape(-1, 1)
-
-                    # SHAP explanation
-                    explainer = shap.KernelExplainer(
-                        predict_fn,
-                        data=np.zeros((1, n_segments)),
-                        link="identity",
-                        l1_reg=f"num_features({min(n_segments, 4)})"
-                    )
-
-                    shap_values = explainer.shap_values(
-                        np.ones((1, n_segments)),
-                        nsamples=80,
-                        silent=True
-                    )
-
-                    # Process SHAP values
-                    if isinstance(shap_values, list):
-                        if len(shap_values) == 2:
-                            shap_values = shap_values[1]
-                        else:
-                            shap_values = shap_values[0]
-
-                    shap_values = np.array(shap_values).squeeze()
-
-                    if shap_values.size != n_segments:
-                        raise ValueError(f"SHAP values mismatch: {shap_values.size} vs {n_segments}")
-
-                    # Create heatmap
-                    shap_heatmap = np.zeros_like(slice_2d, dtype=np.float32)
-                    for i in range(n_segments):
-                        if i < shap_values.size:
-                            shap_heatmap[segments == i] = shap_values[i]
-
-                    # Save visualization
-                    plt.figure(figsize=(10, 10))
-                    plt.imshow(slice_2d, cmap='gray')
-                    plt.imshow(shap_heatmap, alpha=0.4, cmap='jet')
-                    plt.axis('off')
-                    plt.savefig(os.path.join(output_dir, f"slice_{slice_idx}_shap.png"),
-                                bbox_inches='tight', dpi=100)
-                    plt.close()
-
-                except Exception as e:
-                    print(f"Error processing slice {slice_idx}: {str(e)}")
-                    continue
-
-            # Segmentation pipeline
-            try:
                 predicted_array = self.__generate_segmentation__(img, params)
 
+                # Create output directory
+                output_dir = os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)')
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+
+                # Save segmentation and image
                 generated_img = sitk.GetImageFromArray(predicted_array)
                 generated_img.SetSpacing(params['original_spacing'])
                 generated_img.SetOrigin(params['img_origin'])
-
                 sitk.WriteImage(generated_img, os.path.join(output_dir, 'DL_mask.nrrd'))
-                shutil.copy2(filename, os.path.join(output_dir, os.path.basename(filename)))
+                temp_data = sitk.ReadImage(filename)
+                sitk.WriteImage(temp_data, os.path.join(output_dir, 'image.nrrd'))
 
-            except Exception as e:
-                print(f"Error saving outputs: {str(e)}")
-                raise
+                # Generate LIME explanations
+                mask = predicted_array
+                selected_slices = np.where(np.any(mask, axis=(1, 2)))[0]
 
-        return 0
+                # Adjust slices based on z_st to match preprocessed img indices
+                if 'z_st' in params:
+                    adjusted_slices = selected_slices - params['z_st']
+                    valid_indices = (adjusted_slices >= 0) & (adjusted_slices < img.shape[0])
+                    valid_slices = adjusted_slices[valid_indices]
+                else:
+                    valid_slices = selected_slices
+
+                num_slices = min(3, len(valid_slices))
+
+                if num_slices == 0:
+                    print(f"No valid segmented slices found for {filename}, skipping LIME.")
+                    continue
+
+                explainer = lime_image.LimeImageExplainer()
+
+                # Modified prediction function to return aggregated probabilities
+                def batch_predict(images):
+                    # Input shape: (n_samples, 512, 512, 3)
+                    grayscale = images[..., 0].reshape(-1, 512, 512, 1)
+                    preds = self.model1.predict(grayscale)  # Shape: (n_samples, 512, 512, 1)
+                    return np.mean(preds, axis=(1, 2))  # Aggregate to 1D probabilities
+
+                fig_paths = []
+                for i, sl in enumerate(valid_slices[:num_slices]):
+                    original_slice = img[sl, ...]
+                    img_normalized = (original_slice - np.min(original_slice)) / (
+                                np.max(original_slice) - np.min(original_slice) + 1e-8)
+                    img_rgb = np.stack([img_normalized] * 3, axis=-1)
+
+                    explanation = explainer.explain_instance(
+                        img_rgb,
+                        batch_predict,
+                        top_labels=1,
+                        hide_color=0,
+                        num_samples=100  # Reduce for faster computation
+                    )
+
+                    temp, mask_lime = explanation.get_image_and_mask(
+                        explanation.top_labels[0],
+                        positive_only=False,
+                        num_features=5,
+                        hide_rest=False
+                    )
+
+                    plt.figure(figsize=(10, 5))
+                    plt.subplot(1, 2, 1)
+                    plt.imshow(original_slice, cmap='bone')
+                    plt.title(f'Slice {sl} (Adjusted)')
+                    plt.subplot(1, 2, 2)
+                    plt.imshow(mark_boundaries(temp, mask_lime))
+                    plt.title('LIME Explanation')
+                    plt.tight_layout()
+
+                    fig_path = os.path.join(output_dir, f'lime_explanation_{i}.png')
+                    plt.savefig(fig_path, bbox_inches='tight')
+                    plt.close()
+                    fig_paths.append(fig_path)
+
+                # Create PDF report
+                if fig_paths:
+                    pdf_path = os.path.join(output_dir, 'LIME_Report.pdf')
+                    c = canvas.Canvas(pdf_path, pagesize=letter)
+                    for fig in fig_paths:
+                        img_reader = ImageReader(fig)
+                        img_width, img_height = img_reader.getSize()
+                        aspect = img_height / img_width
+                        c.drawImage(fig, 50, 50, width=500, height=500 * aspect)
+                        c.showPage()
+                    c.save()
+
+                count += 1
+                if count == len(self.Patients_gen):
+                    return 0
