@@ -20,5 +20,7 @@ tqdm
 xlrd
 openpyxl
 statannot
-shap
+shap  # Not used as of now
 matplotlib
+lime
+reportlab

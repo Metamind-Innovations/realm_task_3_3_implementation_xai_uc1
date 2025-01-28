@@ -15,7 +15,6 @@ from reportlab.lib.utils import ImageReader
 import lung_extraction_funcs as le
 import generator
 
-from scipy import ndimage
 from tqdm import tqdm as tqdm
 
 
@@ -116,16 +115,24 @@ class ContourPilot:
 
                 explainer = lime_image.LimeImageExplainer()
 
-                # Modified prediction function to return aggregated probabilities
-                def batch_predict(images):
-                    # Input shape: (n_samples, 512, 512, 3)
-                    grayscale = images[..., 0].reshape(-1, 512, 512, 1)
-                    preds = self.model1.predict(grayscale)  # Shape: (n_samples, 512, 512, 1)
-                    return np.mean(preds, axis=(1, 2))  # Aggregate to 1D probabilities
-
                 fig_paths = []
                 for i, sl in enumerate(valid_slices[:num_slices]):
                     original_slice = img[sl, ...]
+
+                    # Threshold to identify lung regions
+                    lung_mask = (original_slice > -500).astype(np.uint8)
+
+                    # Constrain LIME to Lung Areas
+                    def batch_predict(images):
+                        # Convert RGB to grayscale
+                        grayscale = images[..., 0].reshape(-1, 512, 512, 1)
+                        masked_images = grayscale * lung_mask[..., np.newaxis]
+                        predictions = self.model1.predict(masked_images)
+
+                        # Aggregate predictions
+                        return np.mean(predictions, axis=(1, 2))
+
+                    # Generate explanation
                     img_normalized = (original_slice - np.min(original_slice)) / (
                                 np.max(original_slice) - np.min(original_slice) + 1e-8)
                     img_rgb = np.stack([img_normalized] * 3, axis=-1)
@@ -135,20 +142,27 @@ class ContourPilot:
                         batch_predict,
                         top_labels=1,
                         hide_color=0,
-                        num_samples=100  # Reduce for faster computation
+                        num_samples=200,
+                        num_features=5
                     )
 
+                    # Get explanation and apply lung mask
                     temp, mask_lime = explanation.get_image_and_mask(
                         explanation.top_labels[0],
-                        positive_only=False,
-                        num_features=5,
+                        positive_only=True,
+                        num_features=3,
                         hide_rest=False
                     )
 
+                    # Enforce the lung mask
+                    temp = temp * lung_mask[..., np.newaxis]  # Keep only lung regions
+                    mask_lime = mask_lime * lung_mask  # Mask non-lung areas
+
+                    # Plot
                     plt.figure(figsize=(10, 5))
                     plt.subplot(1, 2, 1)
                     plt.imshow(original_slice, cmap='bone')
-                    plt.title(f'Slice {sl} (Adjusted)')
+                    plt.title(f'Slice {sl}')
                     plt.subplot(1, 2, 2)
                     plt.imshow(mark_boundaries(temp, mask_lime))
                     plt.title('LIME Explanation')
