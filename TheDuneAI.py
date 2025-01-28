@@ -46,7 +46,7 @@ class ContourPilot:
         temp_pred_arr = np.zeros_like(img)
         if self.verbosity:
             print('Segmentation started')
-            st = time.time()
+        st = time.time()
         for j in range(len(img)):
             predicted_slice = self.model1.predict(img[j, ...].reshape(-1, 512, 512, 1)).reshape(512, 512)
             temp_pred_arr[j, ...] = 1 * (predicted_slice > thr)
@@ -113,9 +113,10 @@ class ContourPilot:
                     print(f"No valid segmented slices found for {filename}, skipping LIME.")
                     continue
 
-                explainer = lime_image.LimeImageExplainer()
+                explainer = lime_image.LimeImageExplainer(random_state=42)
 
                 fig_paths = []
+                metrics = []
                 for i, sl in enumerate(valid_slices[:num_slices]):
                     original_slice = img[sl, ...]
 
@@ -124,17 +125,14 @@ class ContourPilot:
 
                     # Constrain LIME to Lung Areas
                     def batch_predict(images):
-                        # Convert RGB to grayscale
                         grayscale = images[..., 0].reshape(-1, 512, 512, 1)
                         masked_images = grayscale * lung_mask[..., np.newaxis]
                         predictions = self.model1.predict(masked_images)
-
-                        # Aggregate predictions
                         return np.mean(predictions, axis=(1, 2))
 
-                    # Generate explanation
+                    # Normalize and create RGB image
                     img_normalized = (original_slice - np.min(original_slice)) / (
-                                np.max(original_slice) - np.min(original_slice) + 1e-8)
+                            np.max(original_slice) - np.min(original_slice) + 1e-8)
                     img_rgb = np.stack([img_normalized] * 3, axis=-1)
 
                     explanation = explainer.explain_instance(
@@ -142,21 +140,41 @@ class ContourPilot:
                         batch_predict,
                         top_labels=1,
                         hide_color=0,
-                        num_samples=200,
-                        num_features=5
+                        num_samples=200
                     )
 
                     # Get explanation and apply lung mask
                     temp, mask_lime = explanation.get_image_and_mask(
                         explanation.top_labels[0],
-                        positive_only=True,
-                        num_features=3,
+                        positive_only=False,
+                        num_features=5,
                         hide_rest=False
                     )
 
-                    # Enforce the lung mask
-                    temp = temp * lung_mask[..., np.newaxis]  # Keep only lung regions
-                    mask_lime = mask_lime * lung_mask  # Mask non-lung areas
+                    # Calculate metrics
+                    intersection = np.sum(mask_lime * lung_mask)
+                    union = np.sum(mask_lime) + np.sum(lung_mask) - intersection
+                    confidence_score = np.max(explanation.score)  # Used
+                    iou = intersection / (union + 1e-8)  # Used
+                    recall = intersection / (np.sum(lung_mask) + 1e-8)  # Used
+                    precision = intersection / (np.sum(mask_lime) + 1e-8)  # Used
+                    f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)  # Used
+                    false_positive = np.sum(mask_lime * (1 - lung_mask))
+                    total_negative = np.sum(1 - lung_mask)
+                    fpr = false_positive / (total_negative + 1e-8)  # Used
+                    coverage = intersection / (np.sum(lung_mask) + 1e-8)  # Used
+                    metrics.append({
+                        "slice": sl,
+                        "confidence": confidence_score,
+                        'iou': iou,
+                        'recall': recall,
+                        'precision': precision,
+                        'f1_score': f1_score,
+                        'fpr': fpr,
+                        'coverage': coverage
+                    })
+
+                    print(metrics)
 
                     # Plot
                     plt.figure(figsize=(10, 5))
@@ -177,13 +195,43 @@ class ContourPilot:
                 if fig_paths:
                     pdf_path = os.path.join(output_dir, 'LIME_Report.pdf')
                     c = canvas.Canvas(pdf_path, pagesize=letter)
-                    for fig in fig_paths:
+
+                    # Title Page
+                    c.setFont("Helvetica-Bold", 18)
+                    c.drawString(50, 750, "LIME Explanations Report")
+                    c.setFont("Helvetica", 12)
+                    c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    c.drawString(50, 700, "Project: Lung Cancer Detection with Explainable AI")
+                    c.showPage()
+
+                    for fig, metric in zip(fig_paths, metrics):
                         img_reader = ImageReader(fig)
                         img_width, img_height = img_reader.getSize()
                         aspect = img_height / img_width
-                        c.drawImage(fig, 50, 50, width=500, height=500 * aspect)
+                        c.drawImage(fig, 50, 400, width=500, height=500 * aspect)
+
+                        c.setFont("Helvetica", 10)
+                        c.drawString(50, 380, f"Slice: {metric['slice']}")
+                        c.drawString(50, 360, f"Confidence: {metric['confidence']:.2f}")
+                        c.drawString(50, 340, f"IoU: {metric['iou']:.2f}")
+                        c.drawString(50, 320, f"Recall: {metric['recall']:.2f}")
+                        c.drawString(50, 300, f"Precision: {metric['precision']:.2f}")
+                        c.drawString(50, 280, f"F1 Score: {metric['f1_score']:.2f}")
+                        c.drawString(50, 260, f"Coverage: {metric['coverage']:.2f}")
                         c.showPage()
+
+                    # Summary Section
+                    avg_confidence = np.mean([m['confidence'] for m in metrics])
+
+                    c.setFont("Helvetica-Bold", 14)
+                    c.drawString(50, 750, "Summary")
+                    c.setFont("Helvetica", 12)
+                    c.drawString(50, 720, f"Number of Slices Analyzed: {len(metrics)}")
+                    c.drawString(50, 700, f"Average Confidence: {avg_confidence:.2f}")
+                    c.showPage()
+
                     c.save()
+                    print(f'Report saved to {pdf_path}')
 
                 count += 1
                 if count == len(self.Patients_gen):
