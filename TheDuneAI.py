@@ -4,18 +4,15 @@ import keras
 import cv2
 import time
 import os
-import matplotlib.pyplot as plt
-from lime import lime_image
-from skimage.segmentation import mark_boundaries
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
-
 # Import pipeline functions
 import lung_extraction_funcs as le
 import generator
 
 from tqdm import tqdm as tqdm
+from xai import generate_lime_explanations, GradCAM, generate_xai_report
 
 
 class ContourPilot:
@@ -34,6 +31,7 @@ class ContourPilot:
                                                              extract_lungs=True, size_eval=False,
                                                              verbosity=verbosity, reshape=True, img_only=True)
         self.Output_path = output_path
+        self.gradcam = GradCAM(self.model1)
 
     def __load_model__(self, model_path):
         json_file = open(os.path.join(model_path, 'model_v7.json'), 'r')
@@ -72,9 +70,44 @@ class ContourPilot:
 
         return predicted_array
 
+    def _generate_combined_report(self, lime_paths, gradcam_paths, metrics, output_dir):
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.utils import ImageReader
+
+        pdf_path = os.path.join(output_dir, 'XAI_Combined_Report.pdf')
+        c = canvas.Canvas(pdf_path, pagesize=letter)
+
+        # Title Page
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(50, 750, "Combined XAI Report")
+        c.setFont("Helvetica", 12)
+        c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        c.showPage()
+
+        # Content Pages
+        for (lime_path, gradcam_path, metric) in zip(lime_paths, gradcam_paths, metrics):
+            # LIME Image
+            img = ImageReader(lime_path)
+            c.drawImage(img, 50, 500, width=250, height=250)
+
+            # GRAD-CAM Image
+            img = ImageReader(gradcam_path)
+            c.drawImage(img, 300, 500, width=250, height=250)
+
+            # Metrics
+            c.setFont("Helvetica", 10)
+            y_pos = 480
+            for key, value in metric.items():
+                c.drawString(50, y_pos, f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}")
+                y_pos -= 20
+
+            c.showPage()
+
+        c.save()
+
     def segment(self):
         if self.model1 and self.Patient_dict and self.Output_path:
-            count = 0
             for img, _, filename, params in tqdm(self.Patients_gen, desc='Progress'):
                 filename = filename[0]
                 params = params[0]
@@ -95,7 +128,7 @@ class ContourPilot:
                 temp_data = sitk.ReadImage(filename)
                 sitk.WriteImage(temp_data, os.path.join(output_dir, 'image.nrrd'))
 
-                # Generate LIME explanations
+                # Create a mask from the predicted array
                 mask = predicted_array
                 selected_slices = np.where(np.any(mask, axis=(1, 2)))[0]
 
@@ -107,132 +140,41 @@ class ContourPilot:
                 else:
                     valid_slices = selected_slices
 
+                # Report generated for at most 3 slices. Change this number if needed
                 num_slices = min(3, len(valid_slices))
 
                 if num_slices == 0:
                     print(f"No valid segmented slices found for {filename}, skipping LIME.")
                     continue
 
-                explainer = lime_image.LimeImageExplainer(random_state=42)
+                # XAI Processing
+                lime_metrics = []
+                gradcam_paths = []
+                lime_paths = []
 
-                fig_paths = []
-                metrics = []
                 for i, sl in enumerate(valid_slices[:num_slices]):
                     original_slice = img[sl, ...]
-
-                    # Threshold to identify lung regions
                     lung_mask = (original_slice > -500).astype(np.uint8)
 
-                    # Constrain LIME to Lung Areas
-                    def batch_predict(images):
-                        grayscale = images[..., 0].reshape(-1, 512, 512, 1)
-                        masked_images = grayscale * lung_mask[..., np.newaxis]
-                        predictions = self.model1.predict(masked_images)
-                        return np.mean(predictions, axis=(1, 2))
-
-                    # Normalize and create RGB image
-                    img_normalized = (original_slice - np.min(original_slice)) / (
-                            np.max(original_slice) - np.min(original_slice) + 1e-8)
-                    img_rgb = np.stack([img_normalized] * 3, axis=-1)
-
-                    explanation = explainer.explain_instance(
-                        img_rgb,
-                        batch_predict,
-                        top_labels=1,
-                        hide_color=0,
-                        num_samples=200
+                    # LIME Explanation
+                    lime_metric, lime_path = generate_lime_explanations(
+                        self.model1, original_slice, lung_mask, f"slice_{sl}", output_dir
                     )
+                    lime_metrics.append(lime_metric)
+                    lime_paths.append(lime_path)
 
-                    # Get explanation and apply lung mask
-                    temp, mask_lime = explanation.get_image_and_mask(
-                        explanation.top_labels[0],
-                        positive_only=False,
-                        num_features=5,
-                        hide_rest=False
+                    # GRAD-CAM Explanation
+                    gradcam_path = self.gradcam.explain(
+                        original_slice,
+                        original_slice,
+                        output_dir,
+                        f"slice_{sl}"
                     )
+                    gradcam_paths.append(gradcam_path)
 
-                    # Calculate metrics
-                    intersection = np.sum(mask_lime * lung_mask)
-                    union = np.sum(mask_lime) + np.sum(lung_mask) - intersection
-                    confidence_score = np.max(explanation.score)  # Used
-                    iou = intersection / (union + 1e-8)  # Used
-                    recall = intersection / (np.sum(lung_mask) + 1e-8)  # Used
-                    precision = intersection / (np.sum(mask_lime) + 1e-8)  # Used
-                    f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)  # Used
-                    false_positive = np.sum(mask_lime * (1 - lung_mask))
-                    total_negative = np.sum(1 - lung_mask)
-                    fpr = false_positive / (total_negative + 1e-8)  # Used
-                    coverage = intersection / (np.sum(lung_mask) + 1e-8)  # Used
-                    metrics.append({
-                        "slice": sl,
-                        "confidence": confidence_score,
-                        'iou': iou,
-                        'recall': recall,
-                        'precision': precision,
-                        'f1_score': f1_score,
-                        'fpr': fpr,
-                        'coverage': coverage
-                    })
+                    # Generate individual reports using the shared function
+                generate_xai_report("LIME", lime_paths, lime_metrics, output_dir)
+                generate_xai_report("GRAD-CAM", gradcam_paths, [], output_dir)
 
-                    print(metrics)
-
-                    # Plot
-                    plt.figure(figsize=(10, 5))
-                    plt.subplot(1, 2, 1)
-                    plt.imshow(original_slice, cmap='bone')
-                    plt.title(f'Slice {sl}')
-                    plt.subplot(1, 2, 2)
-                    plt.imshow(mark_boundaries(temp, mask_lime))
-                    plt.title('LIME Explanation')
-                    plt.tight_layout()
-
-                    fig_path = os.path.join(output_dir, f'lime_explanation_{i}.png')
-                    plt.savefig(fig_path, bbox_inches='tight')
-                    plt.close()
-                    fig_paths.append(fig_path)
-
-                # Create PDF report
-                if fig_paths:
-                    pdf_path = os.path.join(output_dir, 'LIME_Report.pdf')
-                    c = canvas.Canvas(pdf_path, pagesize=letter)
-
-                    # Title Page
-                    c.setFont("Helvetica-Bold", 18)
-                    c.drawString(50, 750, "LIME Explanations Report")
-                    c.setFont("Helvetica", 12)
-                    c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                    c.drawString(50, 700, "Project: Lung Cancer Detection with Explainable AI")
-                    c.showPage()
-
-                    for fig, metric in zip(fig_paths, metrics):
-                        img_reader = ImageReader(fig)
-                        img_width, img_height = img_reader.getSize()
-                        aspect = img_height / img_width
-                        c.drawImage(fig, 50, 400, width=500, height=500 * aspect)
-
-                        c.setFont("Helvetica", 10)
-                        c.drawString(50, 380, f"Slice: {metric['slice']}")
-                        c.drawString(50, 360, f"Confidence: {metric['confidence']:.2f}")
-                        c.drawString(50, 340, f"IoU: {metric['iou']:.2f}")
-                        c.drawString(50, 320, f"Recall: {metric['recall']:.2f}")
-                        c.drawString(50, 300, f"Precision: {metric['precision']:.2f}")
-                        c.drawString(50, 280, f"F1 Score: {metric['f1_score']:.2f}")
-                        c.drawString(50, 260, f"Coverage: {metric['coverage']:.2f}")
-                        c.showPage()
-
-                    # Summary Section
-                    avg_confidence = np.mean([m['confidence'] for m in metrics])
-
-                    c.setFont("Helvetica-Bold", 14)
-                    c.drawString(50, 750, "Summary")
-                    c.setFont("Helvetica", 12)
-                    c.drawString(50, 720, f"Number of Slices Analyzed: {len(metrics)}")
-                    c.drawString(50, 700, f"Average Confidence: {avg_confidence:.2f}")
-                    c.showPage()
-
-                    c.save()
-                    print(f'Report saved to {pdf_path}')
-
-                count += 1
-                if count == len(self.Patients_gen):
-                    return 0
+                # Generate combined report
+                self._generate_combined_report(lime_paths, gradcam_paths, lime_metrics, output_dir)
