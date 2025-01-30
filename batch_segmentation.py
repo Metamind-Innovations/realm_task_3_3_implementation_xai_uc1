@@ -19,11 +19,3 @@ model = ContourPilot(model_path, path_to_test_data, save_path, verbosity=True)  
 
 # Start the segmentation process
 model.segment()
-
-# For every UC we need 2 XAI methodologies.
-# Tabular 2 methodologies
-# Genomics maybe 2
-# DICOM surely one method
-# Model agnostic methodologies. Do not be dependent on the model architecture or its weights
-# We need requirement from user which is the sensitivity value that helps us decide which method to use in our fuzzy system
-#
