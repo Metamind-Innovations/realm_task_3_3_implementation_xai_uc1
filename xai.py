@@ -79,7 +79,7 @@ def _save_lime_visualization(lime_image, mask, output_dir, filename):
     plt.imshow(mark_boundaries(lime_image, mask))
     plt.title('LIME Explanation')
     plt.axis('off')
-    plt.savefig(path, bbox_inches='tight')
+    plt.savefig(path, bbox_inches='tight', dpi=100)
     plt.close()
     return path
 
@@ -166,7 +166,7 @@ def _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, laye
     plt.imshow(heatmap, cmap='jet', alpha=0.4)  # Transparent heatmap overlay
     plt.title('GRAD-CAM')
     plt.axis('off')
-    plt.savefig(path, bbox_inches='tight')
+    plt.savefig(path, bbox_inches='tight', dpi=100)
     plt.close()
     return path
 
@@ -184,26 +184,26 @@ def generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics,
     c.showPage()
 
     for orig_path, lime_path, gradcam_path, metric in zip(original_paths, lime_paths, gradcam_paths, metrics):
-        # Page title
-        c.setFont(FONT_BOLD, 16)
-        c.drawString(50, 750, "XAI Explanation Report")
-
         # Image positions
         y_pos = 550
         img_width = 180
 
-        # Original image (left)
-        c.drawImage(ImageReader(orig_path), 50, y_pos, width=img_width, height=img_width)
+        # Only draw available explanations
+        current_x = 50
+        if orig_path:
+            c.drawImage(ImageReader(orig_path), current_x, y_pos, width=img_width, height=img_width)
+            current_x += 150
 
-        # LIME explanation (middle)
-        c.drawImage(ImageReader(lime_path), 250, y_pos, width=img_width, height=img_width)
+        if lime_path:
+            c.drawImage(ImageReader(lime_path), current_x, y_pos, width=img_width, height=img_width)
+            current_x += 150
 
-        # Grad-CAM explanation (right)
-        c.drawImage(ImageReader(gradcam_path), 450, y_pos, width=img_width, height=img_width)
+        if gradcam_path:
+            c.drawImage(ImageReader(gradcam_path), current_x, y_pos, width=img_width, height=img_width)
 
         # Metrics below images
         c.setFont(FONT_NAME, 12)
-        y_metrics = y_pos - 30
+        y_metrics = y_pos - 60
         for key, value in metric.items():
             c.drawString(50, y_metrics, f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}")
             y_metrics -= 20

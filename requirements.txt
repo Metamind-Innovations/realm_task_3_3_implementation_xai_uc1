@@ -24,3 +24,4 @@ shap  # Not used as of now
 matplotlib
 lime
 reportlab
+scikit-fuzzy
