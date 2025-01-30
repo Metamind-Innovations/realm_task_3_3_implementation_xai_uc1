@@ -9,162 +9,205 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
 import time
 
+# Visualization constants
+CMAP_BONE = 'bone'
+FONT_NAME = 'Helvetica'
+FONT_BOLD = 'Helvetica-Bold'
+GRADCAM_LAYER_NAMES = ['conv2d_22', 'conv2d_19', 'conv2d_16', 'conv2d_13']  # Optimal layers from U-Net decoder
 
-# LIME Explanations
+
 def generate_lime_explanations(model, img_slice, lung_mask, filename, output_dir):
-    explainer = lime_image.LimeImageExplainer(random_state=42)
-
-    # Normalize and create RGB image
-    img_normalized = (img_slice - np.min(img_slice)) / (np.max(img_slice) - np.min(img_slice) + 1e-8)
+    """Generate LIME explanations for a single slice."""
+    # Normalize image
+    img_normalized = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
     img_rgb = np.stack([img_normalized] * 3, axis=-1)
 
-    # Prediction function constrained to lung area
-    def batch_predict(images):
-        grayscale = images[..., 0].reshape(-1, 512, 512, 1)
-        masked_images = grayscale * lung_mask[..., np.newaxis]
-        predictions = model.predict(masked_images)
-        return np.mean(predictions, axis=(1, 2))
+    # Create explainer and prediction function
+    explainer = lime_image.LimeImageExplainer(random_state=42)
+    batch_predict = lambda images: _lime_predict(model, images, lung_mask)
 
+    # Generate explanation
     explanation = explainer.explain_instance(
         img_rgb,
         batch_predict,
         top_labels=1,
         hide_color=0,
-        num_samples=200
+        num_samples=100
     )
 
-    temp, mask_lime = explanation.get_image_and_mask(
-        explanation.top_labels[0],
-        positive_only=False,
-        num_features=5,
-        hide_rest=False
+    # Process results
+    image, mask = explanation.get_image_and_mask(
+        explanation.top_labels[0], positive_only=False, num_features=5, hide_rest=False
     )
 
     # Calculate metrics
-    intersection = np.sum(mask_lime * lung_mask)
-    union = np.sum(mask_lime) + np.sum(lung_mask) - intersection
-    metrics = {
+    metrics = _calculate_metrics(mask, lung_mask, explanation)
+
+    # Save visualizations
+    lime_path = _save_lime_visualization(image, mask, output_dir, filename)
+
+    return metrics, lime_path
+
+
+def _lime_predict(model, images, lung_mask):
+    """Helper function for LIME predictions."""
+    grayscale = images[..., 0].reshape(-1, 512, 512, 1)
+    masked = grayscale * lung_mask[..., np.newaxis]
+    return np.mean(model.predict(masked), axis=(1, 2))
+
+
+def _calculate_metrics(mask, lung_mask, explanation):
+    """Calculate XAI metrics."""
+    intersection = np.sum(mask * lung_mask)
+    union = np.sum(mask) + np.sum(lung_mask) - intersection
+
+    return {
         "confidence": np.max(explanation.score),
         "iou": intersection / (union + 1e-8),
         "recall": intersection / (np.sum(lung_mask) + 1e-8),
-        "precision": intersection / (np.sum(mask_lime) + 1e-8),
-        "f1_score": 2 * (intersection / (np.sum(lung_mask) + 1e-8)) * (intersection / (np.sum(mask_lime) + 1e-8)) /
-                    ((intersection / (np.sum(lung_mask) + 1e-8)) + (intersection / (np.sum(mask_lime) + 1e-8)) + 1e-8),
-        "coverage": intersection / (np.sum(lung_mask) + 1e-8)
+        "precision": intersection / (np.sum(mask) + 1e-8),
+        "f1_score": 2 * (intersection / (np.sum(lung_mask) + 1e-8)) *
+                    (intersection / (np.sum(mask) + 1e-8)) /
+                    ((intersection / (np.sum(lung_mask) + 1e-8)) +
+                     (intersection / (np.sum(mask) + 1e-8)) + 1e-8)
     }
 
-    # Save visualization
-    plt.figure(figsize=(10, 5))
-    plt.subplot(1, 2, 1)
-    plt.imshow(img_slice, cmap='bone')
-    plt.title('Original Slice')
-    plt.subplot(1, 2, 2)
-    plt.imshow(mark_boundaries(temp, mask_lime))
+def _save_lime_visualization(lime_image, mask, output_dir, filename):
+    """Save LIME explanation visualization."""
+    path = f"{output_dir}/lime_{filename}.png"
+    plt.figure(figsize=(5,5))
+    plt.imshow(mark_boundaries(lime_image, mask))
     plt.title('LIME Explanation')
-
-    fig_path = f"{output_dir}/lime_explanation_{filename}.png"
-    plt.savefig(fig_path, bbox_inches='tight')
+    plt.axis('off')
+    plt.savefig(path, bbox_inches='tight')
     plt.close()
-
-    return metrics, fig_path
-
-
-# GRAD-CAM Implementation
-class GradCAM:
-    def __init__(self, model, layer_name="conv2d_23"):
-        self.model = model
-        self.layer_name = layer_name
-        self.grad_model = tf.keras.models.Model(
-            [self.model.inputs],
-            [self.model.get_layer(self.layer_name).output, self.model.output]
-        )
-
-    def compute_heatmap(self, img_array, eps=1e-8):
-        with tf.GradientTape() as tape:
-            conv_outputs, predictions = self.grad_model(img_array)
-            pred_index = tf.argmax(predictions[0])
-            loss = predictions[:, pred_index]
-
-        grads = tape.gradient(loss, conv_outputs)
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-        conv_outputs = conv_outputs[0]
-        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap).numpy()
-
-        heatmap = np.maximum(heatmap, 0)
-        heatmap /= (np.max(heatmap) + eps)
-
-        return heatmap
-
-    def overlay_heatmap(self, heatmap, original_img, alpha=0.4):
-        heatmap = cv2.resize(heatmap, (original_img.shape[1], original_img.shape[0]))
-        heatmap = np.uint8(255 * heatmap)
-        heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-        superimposed_img = heatmap * alpha + original_img * (1 - alpha)
-        return np.clip(superimposed_img, 0, 255).astype(np.uint8)
-
-    def explain(self, img_slice, original_img, output_dir, filename):
-        img_array = np.expand_dims(img_slice, axis=0)[..., np.newaxis]
-        heatmap = self.compute_heatmap(img_array)
-
-        # Convert original image to RGB and normalize
-        original_normalized = ((original_img - original_img.min()) /
-                               (original_img.max() - original_img.min()) * 255).astype(np.uint8)
-        original_rgb = np.stack([original_normalized] * 3, axis=-1)
-
-        superimposed = self.overlay_heatmap(heatmap, original_rgb)
-
-        # Save visualization
-        plt.figure(figsize=(10, 5))
-        plt.subplot(1, 2, 1)
-        plt.imshow(original_img, cmap='bone')
-        plt.title('Original Slice')
-        plt.subplot(1, 2, 2)
-        plt.imshow(superimposed)
-        plt.title('GRAD-CAM Explanation')
-
-        fig_path = f"{output_dir}/gradcam_{filename}.png"
-        plt.savefig(fig_path, bbox_inches='tight')
-        plt.close()
-
-        return fig_path
+    return path
 
 
-# Report Generation (common for both methods)
-def generate_xai_report(method_name, fig_paths, metrics, output_dir):
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.utils import ImageReader
-    import time
+def generate_gradcam_explanation(model, input_slice, output_dir, filename, lung_mask=None, layer_name=None):
+    """Generate Grad-CAM explanation with automatic layer selection."""
+    # Auto-select layer if not specified
+    if layer_name is None:
+        for candidate_layer in GRADCAM_LAYER_NAMES:
+            try:
+                # Just check if layer exists, don't create full model yet
+                model.get_layer(candidate_layer)
+                layer_name = candidate_layer
+                break
+            except ValueError:
+                continue
+        if layer_name is None:
+            raise ValueError("No valid Grad-CAM layer found in model")
 
-    pdf_path = f"{output_dir}/{method_name}_Report.pdf"
+    # Create gradient model - SINGLE CREATION POINT
+    grad_model = tf.keras.models.Model(
+        [model.inputs],
+        [model.get_layer(layer_name).output, model.output]
+    )
+
+    # Prepare input
+    input_array = np.expand_dims(input_slice, axis=0)[..., np.newaxis].astype(np.float32)
+
+    # Compute heatmap
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(input_array)
+        loss = tf.reduce_mean(predictions)
+
+    grads = tape.gradient(loss, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    # Generate and process heatmap
+    heatmap = tf.reduce_sum(conv_outputs[0] * pooled_grads, axis=-1).numpy()
+    heatmap = np.maximum(heatmap, 0)
+    heatmap /= (heatmap.max() + 1e-8)
+    heatmap = cv2.resize(heatmap, (input_slice.shape[1], input_slice.shape[0]))  # Resize to original dimensions
+
+    if lung_mask is not None:
+        heatmap *= lung_mask
+
+    return _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, layer_name)
+
+
+def _compute_heatmap(grad_model, img_array, eps=1e-8):
+    """Compute Grad-CAM heatmap using gradient model."""
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(img_array)
+        loss = tf.reduce_mean(predictions)
+
+    grads = tape.gradient(loss, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    heatmap = tf.reduce_sum(conv_outputs[0] * pooled_grads, axis=-1)
+    heatmap = np.maximum(heatmap, 0)
+    heatmap /= (np.max(heatmap) + eps)
+    return heatmap
+
+
+def _normalize_to_rgb(img_slice):
+    """Convert slice to normalized RGB format."""
+    normalized = ((img_slice - img_slice.min()) /
+                  (img_slice.max() - img_slice.min()) * 255).astype(np.uint8)
+    return np.stack([normalized] * 3, axis=-1)
+
+
+def _overlay_heatmap(heatmap, background, alpha=0.4):
+    """Overlay heatmap on background image."""
+    heatmap = cv2.resize(heatmap, (background.shape[1], background.shape[0]))
+    heatmap_uint8 = (heatmap * 255).astype(np.uint8)
+    heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    return cv2.addWeighted(heatmap_colored, alpha, background, 1 - alpha, 0)
+
+
+def _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, layer_name):
+    """Save Grad-CAM visualization without original slice."""
+    path = f"{output_dir}/gradcam_{filename}_{layer_name}.png"
+    plt.figure(figsize=(5, 5))
+    plt.imshow(input_slice, cmap=CMAP_BONE)  # Grayscale background
+    plt.imshow(heatmap, cmap='jet', alpha=0.4)  # Transparent heatmap overlay
+    plt.title('GRAD-CAM')
+    plt.axis('off')
+    plt.savefig(path, bbox_inches='tight')
+    plt.close()
+    return path
+
+
+def generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics, output_dir):
+    """Generate combined XAI report with all explanations in one PDF."""
+    pdf_path = f"{output_dir}/XAI_Combined_Report.pdf"
     c = canvas.Canvas(pdf_path, pagesize=letter)
 
     # Title Page
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(50, 750, f"{method_name} Explanations Report")
-    c.setFont("Helvetica", 12)
+    c.setFont(FONT_BOLD, 18)
+    c.drawString(50, 750, "Combined XAI Report")
+    c.setFont(FONT_NAME, 12)
     c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     c.showPage()
 
-    # Content Pages
-    for fig_path, metric in zip(fig_paths, metrics):
-        img_reader = ImageReader(fig_path)
-        img_width, img_height = img_reader.getSize()
-        aspect = img_height / img_width
-        c.drawImage(fig_path, 50, 400, width=500, height=500 * aspect)
+    for orig_path, lime_path, gradcam_path, metric in zip(original_paths, lime_paths, gradcam_paths, metrics):
+        # Page title
+        c.setFont(FONT_BOLD, 16)
+        c.drawString(50, 750, "XAI Explanation Report")
 
-        c.setFont("Helvetica", 10)
-        y_pos = 380
+        # Image positions
+        y_pos = 550
+        img_width = 180
+
+        # Original image (left)
+        c.drawImage(ImageReader(orig_path), 50, y_pos, width=img_width, height=img_width)
+
+        # LIME explanation (middle)
+        c.drawImage(ImageReader(lime_path), 250, y_pos, width=img_width, height=img_width)
+
+        # Grad-CAM explanation (right)
+        c.drawImage(ImageReader(gradcam_path), 450, y_pos, width=img_width, height=img_width)
+
+        # Metrics below images
+        c.setFont(FONT_NAME, 12)
+        y_metrics = y_pos - 30
         for key, value in metric.items():
-            if isinstance(value, float):
-                c.drawString(50, y_pos, f"{key}: {value:.2f}")
-            else:
-                c.drawString(50, y_pos, f"{key}: {value}")
-            y_pos -= 20
+            c.drawString(50, y_metrics, f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}")
+            y_metrics -= 20
 
         c.showPage()
 
     c.save()
-    return pdf_path

@@ -4,177 +4,170 @@ import keras
 import cv2
 import time
 import os
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.utils import ImageReader
-# Import pipeline functions
 import lung_extraction_funcs as le
+import matplotlib.pyplot as plt
 import generator
-
-from tqdm import tqdm as tqdm
-from xai import generate_lime_explanations, GradCAM, generate_xai_report
+from tqdm import tqdm
+from xai import generate_lime_explanations, generate_gradcam_explanation, generate_combined_report, CMAP_BONE
 
 
 class ContourPilot:
+    """Main class for medical image segmentation and XAI report generation."""
+
     def __init__(self, model_path, data_path, output_path='./', verbosity=False, pat_dict=None):
         self.verbosity = verbosity
-        self.model1 = None
-        self.__load_model__(model_path)
-        if pat_dict:
-            self.Patient_dict = pat_dict
-        else:
-            self.Patient_dict = le.parse_dataset(data_path, img_only=True)
-        self.Patients_gen = generator.Patient_data_generator(self.Patient_dict, predict=True, batch_size=1,
-                                                             image_size=512, shuffle=True,
-                                                             use_window=True, window_params=[1500, -600],
-                                                             resample_int_val=True, resampling_step=25,  # 25
-                                                             extract_lungs=True, size_eval=False,
-                                                             verbosity=verbosity, reshape=True, img_only=True)
-        self.Output_path = output_path
-        self.gradcam = GradCAM(self.model1)
+        self.model = self._load_model(model_path)
+        self.patient_dict = pat_dict if pat_dict else le.parse_dataset(data_path, img_only=True)
+        self.output_path = output_path
 
-    def __load_model__(self, model_path):
-        json_file = open(os.path.join(model_path, 'model_v7.json'), 'r')
-        loaded_model_json = json_file.read()
-        json_file.close()
-        self.model1 = keras.models.model_from_json(loaded_model_json)
-        self.model1.load_weights(os.path.join(model_path, 'weights_v7.hdf5'))
+        # Initialize data generator with explicit parameter names
+        self.patient_generator = generator.Patient_data_generator(
+            patient_dict=self.patient_dict,
+            predict=True,
+            batch_size=1,
+            image_size=512,
+            shuffle=True,
+            use_window=True,
+            window_params=[1500, -600],
+            resample_int_val=True,
+            resampling_step=25,
+            extract_lungs=True,
+            size_eval=False,
+            verbosity=verbosity,
+            reshape=True,
+            img_only=True
+        )
 
-    def __generate_segmentation__(self, img, params, thr=0.99):
-        temp_pred_arr = np.zeros_like(img)
+    def _load_model(self, model_path):
+        """Load Keras model from JSON configuration and weights."""
+        model_config_path = os.path.join(model_path, 'model_v7.json')
+        model_weights_path = os.path.join(model_path, 'weights_v7.hdf5')
+
+        with open(model_config_path, 'r') as json_file:
+            model = keras.models.model_from_json(json_file.read())
+        model.load_weights(model_weights_path)
+        return model
+
+    def _generate_segmentation(self, input_volume, processing_params, threshold=0.99):
+        """Generate 3D segmentation mask using the loaded model."""
         if self.verbosity:
-            print('Segmentation started')
-        st = time.time()
-        for j in range(len(img)):
-            predicted_slice = self.model1.predict(img[j, ...].reshape(-1, 512, 512, 1)).reshape(512, 512)
-            temp_pred_arr[j, ...] = 1 * (predicted_slice > thr)
+            print(f'Starting segmentation for volume of shape {input_volume.shape}...')
+            timer_start = time.time()
+
+        # Initialize prediction array
+        raw_predictions = np.zeros_like(input_volume)
+
+        # Process each slice
+        for slice_idx in range(len(input_volume)):
+            slice_prediction = self.model.predict(
+                input_volume[slice_idx, ...].reshape(-1, 512, 512, 1)
+            ).reshape(512, 512)
+            raw_predictions[slice_idx, ...] = 1 * (slice_prediction > threshold)
+
+        # Post-process predictions
+        processed_mask = le.max_connected_volume_extraction(raw_predictions)
+        final_mask = self._reconstruct_volume(processed_mask, processing_params)
+
         if self.verbosity:
-            print('Segmentation is finished')
-            print('time spent: %s sec.' % (time.time() - st))
-        predicted_arr_temp = le.max_connected_volume_extraction(temp_pred_arr)
-        temporary_mask = np.zeros(params['normalized_shape'], np.uint8)
+            print(f'Segmentation completed in {time.time() - timer_start:.2f} seconds')
 
-        if params['crop_type']:
-            temporary_mask[params['z_st']:params['z_end'], ...] = predicted_arr_temp[:,
-                                                                  params['xy_st']:params['xy_end'],
-                                                                  params['xy_st']:params['xy_end']]
+        return final_mask.astype(np.int8)
+
+    def _reconstruct_volume(self, processed_mask, processing_params):
+        """Reconstruct mask to match original DICOM dimensions and spacing."""
+        reconstructed_volume = np.zeros(processing_params['normalized_shape'], dtype=np.uint8)
+
+        # Calculate crop boundaries
+        z_start, z_end = processing_params['z_st'], processing_params['z_end']
+        xy_start, xy_end = processing_params['xy_st'], processing_params['xy_end']
+
+        if processing_params['crop_type']:
+            reconstructed_volume[z_start:z_end] = processed_mask[:, xy_start:xy_end, xy_start:xy_end]
         else:
-            temporary_mask[params['z_st']:params['z_end'], params['xy_st']:params['xy_end'],
-            params['xy_st']:params['xy_end']] = predicted_arr_temp
+            reconstructed_volume[z_start:z_end, xy_start:xy_end, xy_start:xy_end] = processed_mask
 
-        if temporary_mask.shape != params['original_shape']:
-            predicted_array = np.array(
-                1 * (le.resize_3d_img(temporary_mask, params['original_shape'], cv2.INTER_NEAREST) > 0.5), np.int8)
-        else:
-            predicted_array = np.array(temporary_mask, np.int8)
+        # Resize if necessary
+        if reconstructed_volume.shape != processing_params['original_shape']:
+            return le.resize_3d_img(
+                reconstructed_volume,
+                processing_params['original_shape'],
+                interp=cv2.INTER_NEAREST
+            )
+        return reconstructed_volume
 
-        return predicted_array
+    def _save_results(self, segmentation_mask, processing_params, source_file_path):
+        """Save segmentation results and original image to NRRD format."""
+        patient_id = source_file_path.split('\\')[-2]
+        output_dir = os.path.join(self.output_path, f'{patient_id}_(DL)')
+        os.makedirs(output_dir, exist_ok=True)
 
-    def _generate_combined_report(self, lime_paths, gradcam_paths, metrics, output_dir):
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import letter
-        from reportlab.lib.utils import ImageReader
+        # Save segmentation mask
+        sitk_mask = sitk.GetImageFromArray(segmentation_mask)
+        sitk_mask.SetSpacing(processing_params['original_spacing'])
+        sitk_mask.SetOrigin(processing_params['img_origin'])
+        sitk.WriteImage(sitk_mask, os.path.join(output_dir, 'DL_mask.nrrd'))
 
-        pdf_path = os.path.join(output_dir, 'XAI_Combined_Report.pdf')
-        c = canvas.Canvas(pdf_path, pagesize=letter)
+        # Save original image
+        original_image = sitk.ReadImage(source_file_path)
+        sitk.WriteImage(original_image, os.path.join(output_dir, 'image.nrrd'))
 
-        # Title Page
-        c.setFont("Helvetica-Bold", 18)
-        c.drawString(50, 750, "Combined XAI Report")
-        c.setFont("Helvetica", 12)
-        c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        c.showPage()
+        return output_dir
 
-        # Content Pages
-        for (lime_path, gradcam_path, metric) in zip(lime_paths, gradcam_paths, metrics):
-            # LIME Image
-            img = ImageReader(lime_path)
-            c.drawImage(img, 50, 500, width=250, height=250)
+    def _get_explanation_slices(self, volume, segmentation_mask, processing_params):
+        """Identify valid slices for XAI explanations."""
+        valid_slices = np.where(np.any(segmentation_mask, axis=(1, 2)))[0]
 
-            # GRAD-CAM Image
-            img = ImageReader(gradcam_path)
-            c.drawImage(img, 300, 500, width=250, height=250)
+        # Adjust for preprocessing crops
+        if 'z_st' in processing_params:
+            valid_slices -= processing_params['z_st']
+            valid_slices = valid_slices[(valid_slices >= 0) & (valid_slices < volume.shape[0])]
 
-            # Metrics
-            c.setFont("Helvetica", 10)
-            y_pos = 480
-            for key, value in metric.items():
-                c.drawString(50, y_pos, f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}")
-                y_pos -= 20
-
-            c.showPage()
-
-        c.save()
+        return valid_slices[:3]  # Return max 3 slices
 
     def segment(self):
-        if self.model1 and self.Patient_dict and self.Output_path:
-            for img, _, filename, params in tqdm(self.Patients_gen, desc='Progress'):
-                filename = filename[0]
-                params = params[0]
-                img = np.squeeze(img)  # Shape: (slices, 512, 512)
+        """Main pipeline execution method."""
+        for volume, _, file_path, params in tqdm(self.patient_generator, desc='Processing patients'):
+            volume_array = np.squeeze(volume[0])  # Remove batch dimension
+            processing_params = params[0]
+            file_path = file_path[0]
 
-                predicted_array = self.__generate_segmentation__(img, params)
+            # Generate segmentation
+            segmentation_mask = self._generate_segmentation(volume_array, processing_params)
+            output_dir = self._save_results(segmentation_mask, processing_params, file_path)
 
-                # Create output directory
-                output_dir = os.path.join(self.Output_path, filename.split('\\')[-2] + '_(DL)')
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
+            # Select explanation slices
+            explanation_slices = self._get_explanation_slices(volume_array, segmentation_mask, processing_params)
+            if not explanation_slices.size:
+                print(f"No valid slices found for {file_path}")
+                continue
 
-                # Save segmentation and image
-                generated_img = sitk.GetImageFromArray(predicted_array)
-                generated_img.SetSpacing(params['original_spacing'])
-                generated_img.SetOrigin(params['img_origin'])
-                sitk.WriteImage(generated_img, os.path.join(output_dir, 'DL_mask.nrrd'))
-                temp_data = sitk.ReadImage(filename)
-                sitk.WriteImage(temp_data, os.path.join(output_dir, 'image.nrrd'))
+            # Generate explanations
+            self._generate_xai_reports(volume_array, explanation_slices, output_dir)
 
-                # Create a mask from the predicted array
-                mask = predicted_array
-                selected_slices = np.where(np.any(mask, axis=(1, 2)))[0]
+    def _generate_xai_reports(self, volume, slice_indices, output_dir):
+        """Generate and save XAI explanations for selected slices."""
+        original_paths, lime_paths, gradcam_paths, metrics = [], [], [], []
 
-                # Adjust slices based on z_st to match preprocessed img indices
-                if 'z_st' in params:
-                    adjusted_slices = selected_slices - params['z_st']
-                    valid_indices = (adjusted_slices >= 0) & (adjusted_slices < img.shape[0])
-                    valid_slices = adjusted_slices[valid_indices]
-                else:
-                    valid_slices = selected_slices
+        for slice_idx in slice_indices:
+            ct_slice = volume[slice_idx]
+            lung_mask = (ct_slice > -500).astype(np.uint8)  # Simple lung tissue threshold
 
-                # Report generated for at most 3 slices. Change this number if needed
-                num_slices = min(3, len(valid_slices))
+            # Save original slice separately
+            orig_path = os.path.join(output_dir, f"original_slice_{slice_idx}.png")
+            plt.imsave(orig_path, ct_slice, cmap=CMAP_BONE)
+            original_paths.append(orig_path)
 
-                if num_slices == 0:
-                    print(f"No valid segmented slices found for {filename}, skipping LIME.")
-                    continue
+            # Generate LIME explanation
+            slice_metrics, lime_path = generate_lime_explanations(
+                self.model, ct_slice, lung_mask, f"slice_{slice_idx}", output_dir
+            )
 
-                # XAI Processing
-                lime_metrics = []
-                gradcam_paths = []
-                lime_paths = []
+            # Generate Grad-CAM with optimal layer selection
+            gradcam_path = generate_gradcam_explanation(self.model, ct_slice, output_dir, f"slice_{slice_idx}",
+                                                        layer_name="conv2d_16")
 
-                for i, sl in enumerate(valid_slices[:num_slices]):
-                    original_slice = img[sl, ...]
-                    lung_mask = (original_slice > -500).astype(np.uint8)
+            lime_paths.append(lime_path)
+            gradcam_paths.append(gradcam_path)
+            metrics.append(slice_metrics)
 
-                    # LIME Explanation
-                    lime_metric, lime_path = generate_lime_explanations(
-                        self.model1, original_slice, lung_mask, f"slice_{sl}", output_dir
-                    )
-                    lime_metrics.append(lime_metric)
-                    lime_paths.append(lime_path)
-
-                    # GRAD-CAM Explanation
-                    gradcam_path = self.gradcam.explain(
-                        original_slice,
-                        original_slice,
-                        output_dir,
-                        f"slice_{sl}"
-                    )
-                    gradcam_paths.append(gradcam_path)
-
-                    # Generate individual reports using the shared function
-                generate_xai_report("LIME", lime_paths, lime_metrics, output_dir)
-                generate_xai_report("GRAD-CAM", gradcam_paths, [], output_dir)
-
-                # Generate combined report
-                self._generate_combined_report(lime_paths, gradcam_paths, lime_metrics, output_dir)
+        generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics, output_dir)
