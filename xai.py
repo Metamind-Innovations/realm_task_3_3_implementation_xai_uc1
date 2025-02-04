@@ -171,6 +171,7 @@ def _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, laye
     return path
 
 
+# TODO: Remove metrics
 def generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics, output_dir):
     """Generate combined XAI report with all explanations in one PDF."""
     pdf_path = f"{output_dir}/XAI_Combined_Report.pdf"

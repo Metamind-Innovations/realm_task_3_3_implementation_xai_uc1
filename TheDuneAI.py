@@ -1,28 +1,32 @@
-import SimpleITK as sitk
-import numpy as np
-import keras
-import cv2
-import time
 import os
-import lung_extraction_funcs as le
+import time
+
+import SimpleITK as sitk
+import cv2
+import keras
 import matplotlib.pyplot as plt
-import generator
-from tqdm import tqdm
-from xai import generate_lime_explanations, generate_gradcam_explanation, generate_combined_report, CMAP_BONE
+import numpy as np
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
+from tqdm import tqdm
+
+import generator
+import lung_extraction_funcs as le
+from xai import generate_lime_explanations, generate_gradcam_explanation, generate_combined_report, CMAP_BONE
 
 
 class FuzzyXAISelector:
     def __init__(self):
         # Input variables
+        # TODO: Modify to sensitivity only. Remove LIME and keep only GRADCAM.
+        # TODO: Keep fuzzy logic with everything pointing to GRADCAM
         self.confidence = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'confidence')
         self.complexity = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'complexity')
 
         # Output variable
         self.xai_method = ctrl.Consequent(np.arange(0, 2.1, 0.1), 'xai_method', defuzzify_method='centroid')
 
-        #Membership functions
+        # Membership functions
         self._define_membership_functions()
         self._create_rules()
         self.system = ctrl.ControlSystem(self.rules)
@@ -45,8 +49,10 @@ class FuzzyXAISelector:
 
     def _create_rules(self):
         self.rules = [
-            ctrl.Rule(self.confidence['high'] & self.complexity['simple'], self.xai_method['gradcam']),  # Best and fastest method
-            ctrl.Rule(self.confidence['low'] | self.complexity['complex'], self.xai_method['both']),  # Balanced between methods
+            ctrl.Rule(self.confidence['high'] & self.complexity['simple'], self.xai_method['gradcam']),
+            # Best and fastest method
+            ctrl.Rule(self.confidence['low'] | self.complexity['complex'], self.xai_method['both']),
+            # Balanced between methods
             ctrl.Rule(self.confidence['medium'], self.xai_method['both'])
         ]
 
@@ -56,6 +62,7 @@ class FuzzyXAISelector:
         self.decision_maker.input['complexity'] = complexity
         self.decision_maker.compute()
         return self.decision_maker.output['xai_method']
+
 
 class ContourPilot:
     """Main class for medical image segmentation and XAI report generation."""

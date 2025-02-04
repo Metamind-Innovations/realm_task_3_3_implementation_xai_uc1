@@ -29,5 +29,5 @@ qc_dataframe = toolbox.get_quality_checks(qc_params)
 print(qc_dataframe)
 
 # Convert DICOM dataset to NRRD
-export_path = 'nrrd_converted_radiomics/'
+export_path = './'
 toolbox.convert_to_nrrd(export_path)

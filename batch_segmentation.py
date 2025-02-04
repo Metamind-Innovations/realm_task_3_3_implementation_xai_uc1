@@ -11,8 +11,8 @@ if GPU_compute:
 
 # Model inputs
 model_path = r'./model_files/'  # path to the model files
-path_to_test_data = r'./test_data_duneai'  # path to the input data that will be segmented (nrrds)
-save_path = r'./output_segmentations'  # path for the output files (nrrds)
+path_to_test_data = r'./converted_nrrds'  # path to the input data that will be segmented (nrrds)
+save_path = r'./output_segmentations_radiomics'  # path for the output files (nrrds)
 
 # initialize the model
 model = ContourPilot(model_path, path_to_test_data, save_path, verbosity=True)  # set verbosity=True to see what is going on
