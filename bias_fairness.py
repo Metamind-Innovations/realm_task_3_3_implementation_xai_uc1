@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from fairlearn.metrics import (
@@ -7,6 +8,7 @@ from fairlearn.metrics import (
 )
 from imblearn.over_sampling import SMOTE
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from sklearn.model_selection import train_test_split
 
 
@@ -26,8 +28,9 @@ def load_and_preprocess(filepath):
     # Ensure deadstatus.event is binary with correct orientation
     df['deadstatus.event'] = df['deadstatus.event'].astype(int)
 
-    return df[['gender', 'age', 'deadstatus.event'] +
-              [c for c in df.columns if 'Overall.Stage' in c or 'Histology' in c]]
+    # Select features of interest
+    cols = ['gender', 'age', 'deadstatus.event'] + [c for c in df.columns if 'Overall.Stage' in c or 'Histology' in c]
+    return df[cols]
 
 
 # Prepare data with SMOTE oversampling
@@ -55,8 +58,7 @@ def train_model(X_train, y_train):
     # Explicitly specify class weight for deadstatus.event=1
     model = LogisticRegression(
         max_iter=1000,
-        class_weight={1: 0.7, 0: 0.3},
-        # Mortality prediction (class1) is more critical than survival prediction (class2)
+        class_weight={1: 0.7, 0: 0.3},  # Mortality prediction is more critical
         solver='liblinear',
         random_state=42,
         penalty='l2',
@@ -69,11 +71,9 @@ def train_model(X_train, y_train):
 # Calculate fairness metrics
 def calculate_fairness(y_true, y_pred, sensitive_feature):
     groups = ['male' if g == 0 else 'female' for g in sensitive_feature]
-
     eo_diff = equalized_odds_difference(y_true, y_pred, sensitive_features=groups)
     eo_ratio = equalized_odds_ratio(y_true, y_pred, sensitive_features=groups)
     dp_diff = demographic_parity_difference(y_true, y_pred, sensitive_features=groups)
-
     return eo_diff, eo_ratio, dp_diff
 
 
@@ -84,22 +84,46 @@ def demographic_parity(df):
     male_mortality_rate = mortality_rate.loc['Male', 'Mortality Rate']
     female_mortality_rate = mortality_rate.loc['Female', 'Mortality Rate']
     percentage_difference = ((male_mortality_rate - female_mortality_rate) / female_mortality_rate) * 100
-    if male_mortality_rate > female_mortality_rate:
-        gender = 'Male'
-    else:
-        gender = 'Female'
+    gender = 'Male' if male_mortality_rate > female_mortality_rate else 'Female'
     return mortality_rate, gender, percentage_difference
+
+
+def plot_group_confusion_matrices(y_true, y_pred, sensitive_feature):
+    # Create figure with two subplots side by side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+
+    # Calculate prevalence for each group
+    male_mask = (sensitive_feature == 0)
+    female_mask = (sensitive_feature == 1)
+    male_prev = male_mask.mean() * 100
+    female_prev = female_mask.mean() * 100
+
+    # Plot confusion matrix for male group
+    male_cm = confusion_matrix(y_true[male_mask], y_pred[male_mask])
+    disp1 = ConfusionMatrixDisplay(confusion_matrix=male_cm)
+    disp1.plot(ax=ax1, cmap='viridis')
+    ax1.set_title(f'Male Group\nPrevalence: {male_prev:.1f}%')
+
+    # Plot confusion matrix for female group
+    female_cm = confusion_matrix(y_true[female_mask], y_pred[female_mask])
+    disp2 = ConfusionMatrixDisplay(confusion_matrix=female_cm)
+    disp2.plot(ax=ax2, cmap='viridis')
+    ax2.set_title(f'Female Group\nPrevalence: {female_prev:.1f}%')
+
+    plt.tight_layout()
+    plt.show()
 
 
 def main():
     csv_path = 'test_data_radiomics/NSCLC-Radiomics-Lung1.clinical-version3-Oct-2019.csv'
+
     # Load and preprocess data
     df = load_and_preprocess(csv_path)
 
     # Prepare balanced dataset
     X_train, X_test, y_train, y_test = prepare_data(df)
 
-    # Train and evaluate model
+    # Train model and predict
     model = train_model(X_train, y_train)
     y_pred = model.predict(X_test)
 
@@ -121,29 +145,47 @@ def main():
     print('**Fairness Metrics**')
     # Equalized Odds Difference
     print(
-        f"A {eo_diff * 100:.2f}% disparity in error rates between gender groups is detected. (Equalized Odds Difference: {eo_diff:.4f})")
-    print(
-        'Both genders receive equally reliable predictions. The <5% required difference for medical models as outlined by REALM is met.') if eo_diff <= 0.05 else (
-        print('The <5% required difference for medical models as outlined by REALM is not met.'))
-    print(f'{"=" * 40}')
+        f"A {eo_diff * 100:.2f}% disparity in error rates between gender groups is detected (Equalized Odds Difference: {eo_diff:.4f}).")
+    if eo_diff <= 0.05:
+        print(
+            "Both genders receive equally reliable predictions. The <5% required difference for medical models as outlined by REALM is met.")
+    else:
+        print("The <5% required difference for medical models as outlined by REALM is not met.")
+    print('=' * 40)
 
     # Equalized Odds Ratio
     print(
-        f"A parity of {eo_ratio * 100:.2f}% in error rate rations is detected between groups. (Equalized Odds Ratio: {eo_ratio:.4f})")
-    if 1.0 >= eo_ratio >= 0.9: print('A nearly perfect alignment with the ideal ratio of 1.0 is shown.')
-    print(f'{"=" * 40}')
+        f"A parity of {eo_ratio * 100:.2f}% in error rate ratios is detected between groups (Equalized Odds Ratio: {eo_ratio:.4f}).")
+    if 1.0 >= eo_ratio >= 0.9:
+        print("A nearly perfect alignment with the ideal ratio of 1.0 is shown.")
+    print('=' * 40)
 
     # Demographic Parity
-    print(f'{gender}s have a {abs(percentage_difference):.2f}% greater chance of death')
+    print(f"{gender}s have a {abs(percentage_difference):.2f}% greater chance of death.")
     print(
-        f'A {dp_diff * 100:.2f}% in positive prediction rates (mortality) is found. (Demographic Parity Difference: {dp_diff:.4f})')
-    print('Within demographic parity acceptable range of <3%, per REALM guidelines') if dp_diff <= 0.03 else (
-        print('Not within demographic parity acceptable range of <3%, per REALM guidelines'))
+        f"A {dp_diff * 100:.2f}% difference in positive prediction rates (mortality) is found (Demographic Parity Difference: {dp_diff:.4f}).")
+    if dp_diff <= 0.03:
+        print("Within the acceptable demographic parity range (<3%), per REALM guidelines.")
+    else:
+        print("Not within the acceptable demographic parity range (<3%), per REALM guidelines.")
+
+    # Print confusion matrix (text output)
+    cm = confusion_matrix(y_test, y_pred)
+    print('\n**Confusion Matrix**')
+    print(cm)
+
+    # Also plot the confusion matrix
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    disp.plot(cmap=plt.cm.Blues)
+    plt.title('Confusion Matrix')
+    plt.show()
+
+    plot_group_confusion_matrices(y_test, y_pred, X_test['gender'])
 
     # Feature importance analysis with correct interpretation
     coef_df = pd.DataFrame({
         'feature': X_train.columns,
-        'odds_ratio': np.exp(model.coef_[0])  # Convert to odds ratios
+        'odds_ratio': np.exp(model.coef_[0])  # Convert coefficients to odds ratios
     }).sort_values('odds_ratio', ascending=False)
 
     print(f"\n{'=' * 40}\nTop 5 Predictive Features (Odds Ratios):\n{'=' * 40}")
