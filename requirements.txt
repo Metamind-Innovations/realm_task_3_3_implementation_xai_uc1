@@ -25,3 +25,7 @@ matplotlib
 lime
 reportlab
 scikit-fuzzy
+precision-medicine-toolbox
+fairlearn
+imbalanced-learn
+requests
