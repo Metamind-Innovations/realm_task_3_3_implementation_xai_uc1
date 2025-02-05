@@ -6,7 +6,6 @@ matplotlib
 numpy
 opencv_python
 pandas
-precision_medicine_toolbox
 reportlab
 scikit_fuzzy
 scikit_learn
