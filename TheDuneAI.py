@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 import generator
 import lung_extraction_funcs as le
-from xai import generate_lime_explanations, generate_gradcam_explanation, generate_combined_report, CMAP_BONE
+from xai import generate_gradcam_explanation, generate_combined_report, CMAP_BONE
 
 
 class FuzzyXAISelector:
@@ -116,7 +116,7 @@ class ContourPilot:
         if self.verbosity:
             print(f'Segmentation completed in {time.time() - timer_start:.2f} seconds')
 
-        return final_mask.astype(np.int8)
+        return final_mask.astype(np.int8), processed_mask
 
     def _reconstruct_volume(self, processed_mask, processing_params):
         """Reconstruct mask to match original DICOM dimensions and spacing."""
@@ -179,7 +179,7 @@ class ContourPilot:
             file_path = file_path[0]
 
             # Generate segmentation
-            segmentation_mask = self._generate_segmentation(volume_array, processing_params)
+            segmentation_mask, processed_mask = self._generate_segmentation(volume_array, processing_params)
             output_dir = self._save_results(segmentation_mask, processing_params, file_path)
             explanation_slices = self._get_explanation_slices(volume_array, segmentation_mask, processing_params)
 
@@ -198,25 +198,17 @@ class ContourPilot:
                 volume_array,
                 explanation_slices,
                 output_dir,
-                gradcam_layer=f'conv2d_{selected_layer}'
+                gradcam_layer=f'conv2d_{selected_layer}',
+                processed_mask=processed_mask
             )
 
-            # Select explanation slices
-            explanation_slices = self._get_explanation_slices(volume_array, segmentation_mask, processing_params)
-            if not explanation_slices.size:
-                print(f"No valid slices found for {file_path}")
-                continue
-
-            # Generate explanations
-            self._generate_xai_reports(volume_array, explanation_slices, output_dir, f'conv2d_{selected_layer}')
-
-    def _generate_xai_reports(self, volume, slice_indices, output_dir, gradcam_layer, use_lime=False, use_gradcam=True):
+    def _generate_xai_reports(self, volume, slice_indices, output_dir, gradcam_layer, processed_mask, use_gradcam=True):
         """Generate and save XAI explanations for selected slices."""
-        original_paths, lime_paths, gradcam_paths, metrics = [], [], [], []
+        original_paths, gradcam_paths, segmented_paths = [], [], []
 
         for slice_idx in slice_indices:
             ct_slice = volume[slice_idx]
-            lung_mask = (ct_slice > -500).astype(np.uint8)  # Simple lung tissue threshold
+            mask_slice = processed_mask[slice_idx]
 
             # Save original slice separately
             orig_path = os.path.join(output_dir, f"original_slice_{slice_idx}.png")
@@ -228,15 +220,27 @@ class ContourPilot:
             plt.close()
             original_paths.append(orig_path)
 
-            slice_metrics = {}
-            lime_path = gradcam_path = None
+            # Generate segmented slice overlay
+            segmented_path = os.path.join(output_dir, f'segmented_slice_{slice_idx}.png')
+            plt.figure(figsize=(5, 5))
+            plt.imshow(ct_slice, cmap=CMAP_BONE)
+            plt.imshow(mask_slice, cmap='Reds', alpha=0.5)  # Transparent overlay
+            plt.title('Segmented Slice')
+            plt.axis('off')
+            plt.savefig(segmented_path, bbox_inches='tight', dpi=100)
+            plt.close()
+            segmented_paths.append(segmented_path)
 
-            if use_lime:
-                slice_metrics, lime_path = generate_lime_explanations(
-                    self.model, ct_slice, lung_mask, f"slice_{slice_idx}", output_dir
-                )
-                lime_paths.append(lime_path)
-                metrics.append(slice_metrics)
+            # slice_metrics = {}
+            # lime_path = None
+            gradcam_path = None
+
+            # if use_lime:
+            #     slice_metrics, lime_path = generate_lime_explanations(
+            #         self.model, ct_slice, lung_mask, f"slice_{slice_idx}", output_dir
+            #     )
+            #     lime_paths.append(lime_path)
+            #     metrics.append(slice_metrics)
 
             if use_gradcam:
                 gradcam_path = generate_gradcam_explanation(
@@ -248,4 +252,4 @@ class ContourPilot:
                 )
                 gradcam_paths.append(gradcam_path)
 
-        generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics, output_dir)
+        generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir)

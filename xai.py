@@ -1,13 +1,14 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from lime import lime_image
-from skimage.segmentation import mark_boundaries
-import tensorflow as tf
-import cv2
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.utils import ImageReader
 import time
+
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import tensorflow as tf
+from PIL import Image
+from lime import lime_image
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from skimage.segmentation import mark_boundaries
 
 # Visualization constants
 CMAP_BONE = 'bone'
@@ -72,10 +73,11 @@ def _calculate_metrics(mask, lung_mask, explanation):
                      (intersection / (np.sum(mask) + 1e-8)) + 1e-8)
     }
 
+
 def _save_lime_visualization(lime_image, mask, output_dir, filename):
     """Save LIME explanation visualization."""
     path = f"{output_dir}/lime_{filename}.png"
-    plt.figure(figsize=(5,5))
+    plt.figure(figsize=(5, 5))
     plt.imshow(mark_boundaries(lime_image, mask))
     plt.title('LIME Explanation')
     plt.axis('off')
@@ -171,11 +173,14 @@ def _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, laye
     return path
 
 
-# TODO: Remove metrics
-def generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics, output_dir):
+def generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir):
     """Generate combined XAI report with all explanations in one PDF."""
     pdf_path = f"{output_dir}/XAI_Combined_Report.pdf"
     c = canvas.Canvas(pdf_path, pagesize=letter)
+
+    # Image positions
+    img_width = 180
+    y_pos = 550
 
     # Title Page
     c.setFont(FONT_BOLD, 18)
@@ -184,30 +189,32 @@ def generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics,
     c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     c.showPage()
 
-    for orig_path, lime_path, gradcam_path, metric in zip(original_paths, lime_paths, gradcam_paths, metrics):
-        # Image positions
-        y_pos = 550
-        img_width = 180
+    for orig_path, seg_path, grad_path in zip(original_paths, segmented_paths, gradcam_paths):
+        current_x = 20
 
-        # Only draw available explanations
-        current_x = 50
+        # Draw Original Slice
         if orig_path:
-            c.drawImage(ImageReader(orig_path), current_x, y_pos, width=img_width, height=img_width)
-            current_x += 150
+            with Image.open(orig_path) as img:
+                aspect_ratio = img.width / img.height
+                img_height = img_width / aspect_ratio
+            c.drawImage(orig_path, current_x, y_pos - img_height,
+                        width=img_width, height=img_height)
+            current_x += img_width + 10
 
-        if lime_path:
-            c.drawImage(ImageReader(lime_path), current_x, y_pos, width=img_width, height=img_width)
-            current_x += 150
+        # Draw Segmented Slice (middle)
+        if seg_path:
+            with Image.open(seg_path) as img:
+                seg_height = img_width / (img.width / img.height)
+            c.drawImage(seg_path, current_x, y_pos - seg_height,
+                        width=img_width, height=seg_height)
+            current_x += img_width + 10
 
-        if gradcam_path:
-            c.drawImage(ImageReader(gradcam_path), current_x, y_pos, width=img_width, height=img_width)
-
-        # Metrics below images
-        c.setFont(FONT_NAME, 12)
-        y_metrics = y_pos - 60
-        for key, value in metric.items():
-            c.drawString(50, y_metrics, f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}")
-            y_metrics -= 20
+        # Draw Grad-CAM
+        if grad_path:
+            with Image.open(grad_path) as img:
+                grad_height = img_width / (img.width / img.height)
+            c.drawImage(grad_path, current_x, y_pos - grad_height,
+                        width=img_width, height=grad_height)
 
         c.showPage()
 
