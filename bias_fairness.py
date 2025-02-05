@@ -236,9 +236,10 @@ def main():
 
     # Also plot the confusion matrix
     disp = ConfusionMatrixDisplay(confusion_matrix=cm)
-    disp.plot(cmap=plt.cm.Blues)
+    fig, ax = plt.subplots()
+    disp.plot(ax=ax, cmap=plt.cm.Blues)
     plt.title('Confusion Matrix')
-    plt.show()
+    plt.close(fig)
 
     plot_group_confusion_matrices(y_test, y_pred, X_test['gender'])
 
@@ -263,15 +264,16 @@ def main():
     figures = []
 
     # Save confusion matrices to figures list
-    fig = plt.figure()
-    disp.plot(cmap=plt.cm.Blues)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    disp.plot(ax=ax, cmap=plt.cm.Blues)
     plt.title('Overall Confusion Matrix')
     figures.append(fig)
     plt.close(fig)
 
-    fig = plot_group_confusion_matrices(y_test, y_pred, X_test['gender'])
-    figures.append(fig)
-    plt.close(fig)
+    # Save group confusion matrices
+    group_fig = plot_group_confusion_matrices(y_test, y_pred, X_test['gender'])
+    figures.append(group_fig)
+    plt.close(group_fig)
 
     # Generate PDF
     generate_pdf_report(report_metrics, figures)
