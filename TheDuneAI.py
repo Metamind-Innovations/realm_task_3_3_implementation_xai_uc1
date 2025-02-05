@@ -18,13 +18,10 @@ from xai import generate_lime_explanations, generate_gradcam_explanation, genera
 class FuzzyXAISelector:
     def __init__(self):
         # Input variables
-        # TODO: Modify to sensitivity only. Remove LIME and keep only GRADCAM.
-        # TODO: Keep fuzzy logic with everything pointing to GRADCAM
-        self.confidence = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'confidence')
-        self.complexity = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'complexity')
+        self.sensitivity = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'sensitivity')
 
-        # Output variable
-        self.xai_method = ctrl.Consequent(np.arange(0, 2.1, 0.1), 'xai_method', defuzzify_method='centroid')
+        # Output as gradcam layer
+        self.gradcam_layer = ctrl.Consequent(np.arange(16, 23, 1), 'gradcam_layer', defuzzify_method='centroid')
 
         # Membership functions
         self._define_membership_functions()
@@ -33,35 +30,30 @@ class FuzzyXAISelector:
         self.decision_maker = ctrl.ControlSystemSimulation(self.system)
 
     def _define_membership_functions(self):
-        # Confidence levels
-        self.confidence['low'] = fuzz.trimf(self.confidence.universe, [0, 0, 0.5])
-        self.confidence['medium'] = fuzz.trimf(self.confidence.universe, [0.3, 0.5, 0.7])
-        self.confidence['high'] = fuzz.trimf(self.confidence.universe, [0.5, 1, 1])
+        # Sensitivity levels
+        self.sensitivity['low'] = fuzz.trimf(self.sensitivity.universe, [0, 0, 0.5])
+        self.sensitivity['medium'] = fuzz.trimf(self.sensitivity.universe, [0.3, 0.5, 0.7])
+        self.sensitivity['high'] = fuzz.trimf(self.sensitivity.universe, [0.5, 1, 1])
 
-        # Image complexity (example metric)
-        self.complexity['simple'] = fuzz.trimf(self.complexity.universe, [0, 0, 0.6])
-        self.complexity['complex'] = fuzz.trimf(self.complexity.universe, [0.4, 1, 1])
-
-        # XAI method choices: 0=Grad-CAM, 1=Both, 2=LIME
-        self.xai_method['gradcam'] = fuzz.trimf(self.xai_method.universe, [0, 0, 1])
-        self.xai_method['both'] = fuzz.trimf(self.xai_method.universe, [0.5, 1, 1.5])
-        self.xai_method['lime'] = fuzz.trimf(self.xai_method.universe, [1, 2, 2])
+        # Layer selection
+        layers = [16, 17, 18, 19, 20, 21, 22]
+        for layer in layers:
+            self.gradcam_layer[f'conv{layer}'] = fuzz.trimf(
+                self.gradcam_layer.universe,
+                [layer - 0.5, layer, layer + 0.5]
+            )
 
     def _create_rules(self):
         self.rules = [
-            ctrl.Rule(self.confidence['high'] & self.complexity['simple'], self.xai_method['gradcam']),
-            # Best and fastest method
-            ctrl.Rule(self.confidence['low'] | self.complexity['complex'], self.xai_method['both']),
-            # Balanced between methods
-            ctrl.Rule(self.confidence['medium'], self.xai_method['both'])
+            ctrl.Rule(self.sensitivity['low'], self.gradcam_layer['conv16']),
+            ctrl.Rule(self.sensitivity['medium'], self.gradcam_layer['conv19']),
+            ctrl.Rule(self.sensitivity['high'], self.gradcam_layer['conv22'])
         ]
 
-    def decide(self, confidence, complexity):
-        """Return selected XAI methods based on fuzzy evaluation."""
-        self.decision_maker.input['confidence'] = confidence
-        self.decision_maker.input['complexity'] = complexity
+    def decide(self, sensitivity):
+        self.decision_maker.input['sensitivity'] = sensitivity
         self.decision_maker.compute()
-        return self.decision_maker.output['xai_method']
+        return int(round(self.decision_maker.output['gradcam_layer']))
 
 
 class ContourPilot:
@@ -195,21 +187,18 @@ class ContourPilot:
                 print(f"No valid slices found for {file_path}")
                 continue
 
-            avg_confidence = np.mean(volume_array)
-            complexity = np.var(volume_array)
+            # Calculate sensitivity
+            sensitivity = np.percentile(volume_array, 95) / 4095  # Normalize to 0-1
 
-            # Get fuzzy decision
-            xai_decision = fuzzy_selector.decide(avg_confidence, complexity)
-            use_lime = xai_decision >= 1.0
-            use_gradcam = xai_decision <= 1.5
+            # Get selected layer from fuzzy logic
+            selected_layer = fuzzy_selector.decide(sensitivity)
 
             # Generate explanations conditionally
             self._generate_xai_reports(
                 volume_array,
                 explanation_slices,
                 output_dir,
-                use_lime=use_lime,
-                use_gradcam=use_gradcam
+                gradcam_layer=f'conv2d_{selected_layer}'
             )
 
             # Select explanation slices
@@ -219,9 +208,9 @@ class ContourPilot:
                 continue
 
             # Generate explanations
-            self._generate_xai_reports(volume_array, explanation_slices, output_dir)
+            self._generate_xai_reports(volume_array, explanation_slices, output_dir, f'conv2d_{selected_layer}')
 
-    def _generate_xai_reports(self, volume, slice_indices, output_dir, use_lime=True, use_gradcam=True):
+    def _generate_xai_reports(self, volume, slice_indices, output_dir, gradcam_layer, use_lime=False, use_gradcam=True):
         """Generate and save XAI explanations for selected slices."""
         original_paths, lime_paths, gradcam_paths, metrics = [], [], [], []
 
@@ -246,14 +235,17 @@ class ContourPilot:
                 slice_metrics, lime_path = generate_lime_explanations(
                     self.model, ct_slice, lung_mask, f"slice_{slice_idx}", output_dir
                 )
+                lime_paths.append(lime_path)
+                metrics.append(slice_metrics)
 
             if use_gradcam:
                 gradcam_path = generate_gradcam_explanation(
-                    self.model, ct_slice, output_dir, f"slice_{slice_idx}", layer_name="conv2d_16"
+                    self.model,
+                    ct_slice,
+                    output_dir,
+                    f"slice_{slice_idx}",
+                    layer_name=gradcam_layer
                 )
-
-            lime_paths.append(lime_path)
-            gradcam_paths.append(gradcam_path)
-            metrics.append(slice_metrics)
+                gradcam_paths.append(gradcam_path)
 
         generate_combined_report(original_paths, lime_paths, gradcam_paths, metrics, output_dir)
