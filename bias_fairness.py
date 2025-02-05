@@ -1,3 +1,5 @@
+import tempfile
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -7,6 +9,11 @@ from fairlearn.metrics import (
     equalized_odds_ratio,
 )
 from imblearn.over_sampling import SMOTE
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from sklearn.model_selection import train_test_split
@@ -111,7 +118,60 @@ def plot_group_confusion_matrices(y_true, y_pred, sensitive_feature):
     ax2.set_title(f'Female Group\nPrevalence: {female_prev:.1f}%')
 
     plt.tight_layout()
-    plt.show()
+    return fig
+
+
+def generate_pdf_report(metrics, figures, output_path='report.pdf'):
+    doc = SimpleDocTemplate(output_path, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    title_style = ParagraphStyle(
+        'Title',
+        parent=styles['Title'],
+        fontSize=18,
+        spaceAfter=12,
+        alignment=1
+    )
+
+    story.append(Paragraph("Medical Model Fairness Analysis Report", title_style))
+
+    # Key Metrics Table
+    metrics_data = [
+        ["Metric", "Value", "REALM Guideline"],
+        ["Equalized Odds Difference", f"{metrics['eo_diff'] * 100:.2f}%", "<5%"],
+        ["Demographic Parity", f"{metrics['dp_diff'] * 100:.2f}%", "<3%"],
+        ["Mortality Rate Difference", f"{metrics['mortality_diff']:.2f}%", "N/A"]
+    ]
+
+    metrics_table = Table(metrics_data)
+    metrics_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+    ]))
+    story.append(metrics_table)
+    story.append(Spacer(1, 0.25 * inch))
+
+    # Add Figures
+    for fig in figures:
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
+            fig.savefig(tmpfile.name, dpi=300, bbox_inches='tight')
+            story.append(Image(tmpfile.name, width=6 * inch, height=4 * inch))
+            story.append(Spacer(1, 0.25 * inch))
+
+    # Feature Importance
+    story.append(Paragraph("Top Predictive Features:", styles['Heading2']))
+    feature_data = [["Feature", "Odds Ratio"]] + metrics['feature_importance']
+    feature_table = Table(feature_data)
+    feature_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+    ]))
+    story.append(feature_table)
+
+    doc.build(story)
 
 
 def main():
@@ -190,6 +250,33 @@ def main():
 
     print(f"\n{'=' * 40}\nTop 5 Predictive Features (Odds Ratios):\n{'=' * 40}")
     print(coef_df.head(5).to_string(index=False))
+
+    # Collect metrics for PDF report
+    report_metrics = {
+        'eo_diff': eo_diff,
+        'dp_diff': dp_diff,
+        'mortality_diff': percentage_difference,
+        'feature_importance': coef_df.head(5).values.tolist()
+    }
+
+    # Generate figures for PDF
+    figures = []
+
+    # Save confusion matrices to figures list
+    fig = plt.figure()
+    disp.plot(cmap=plt.cm.Blues)
+    plt.title('Overall Confusion Matrix')
+    figures.append(fig)
+    plt.close(fig)
+
+    fig = plot_group_confusion_matrices(y_test, y_pred, X_test['gender'])
+    figures.append(fig)
+    plt.close(fig)
+
+    # Generate PDF
+    generate_pdf_report(report_metrics, figures)
+
+    print(f"\nPDF report generated: fairness_report.pdf")
 
 
 if __name__ == "__main__":
