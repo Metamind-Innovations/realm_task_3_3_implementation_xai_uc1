@@ -172,50 +172,51 @@ def _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, laye
     plt.close()
     return path
 
-
-def generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir):
-    """Generate combined XAI report with all explanations in one PDF."""
-    pdf_path = f"{output_dir}/XAI_Combined_Report.pdf"
-    c = canvas.Canvas(pdf_path, pagesize=letter)
-
-    # Image positions
-    img_width = 180
-    y_pos = 550
-
-    # Title Page
-    c.setFont(FONT_BOLD, 18)
-    c.drawString(50, 750, "Combined XAI Report")
-    c.setFont(FONT_NAME, 12)
-    c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    c.showPage()
-
-    for orig_path, seg_path, grad_path in zip(original_paths, segmented_paths, gradcam_paths):
-        current_x = 20
-
-        # Draw Original Slice
-        if orig_path:
-            with Image.open(orig_path) as img:
-                aspect_ratio = img.width / img.height
-                img_height = img_width / aspect_ratio
-            c.drawImage(orig_path, current_x, y_pos - img_height,
-                        width=img_width, height=img_height)
-            current_x += img_width + 10
-
-        # Draw Segmented Slice (middle)
-        if seg_path:
-            with Image.open(seg_path) as img:
-                seg_height = img_width / (img.width / img.height)
-            c.drawImage(seg_path, current_x, y_pos - seg_height,
-                        width=img_width, height=seg_height)
-            current_x += img_width + 10
-
-        # Draw Grad-CAM
-        if grad_path:
-            with Image.open(grad_path) as img:
-                grad_height = img_width / (img.width / img.height)
-            c.drawImage(grad_path, current_x, y_pos - grad_height,
-                        width=img_width, height=grad_height)
-
-        c.showPage()
-
-    c.save()
+# Commented out below code is for generating combined report
+#
+# def generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir):
+#     """Generate combined XAI report with all explanations in one PDF."""
+#     pdf_path = f"{output_dir}/XAI_Combined_Report.pdf"
+#     c = canvas.Canvas(pdf_path, pagesize=letter)
+#
+#     # Image positions
+#     img_width = 180
+#     y_pos = 550
+#
+#     # Title Page
+#     c.setFont(FONT_BOLD, 18)
+#     c.drawString(50, 750, "Combined XAI Report")
+#     c.setFont(FONT_NAME, 12)
+#     c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+#     c.showPage()
+#
+#     for orig_path, seg_path, grad_path in zip(original_paths, segmented_paths, gradcam_paths):
+#         current_x = 20
+#
+#         # Draw Original Slice
+#         if orig_path:
+#             with Image.open(orig_path) as img:
+#                 aspect_ratio = img.width / img.height
+#                 img_height = img_width / aspect_ratio
+#             c.drawImage(orig_path, current_x, y_pos - img_height,
+#                         width=img_width, height=img_height)
+#             current_x += img_width + 10
+#
+#         # Draw Segmented Slice (middle)
+#         if seg_path:
+#             with Image.open(seg_path) as img:
+#                 seg_height = img_width / (img.width / img.height)
+#             c.drawImage(seg_path, current_x, y_pos - seg_height,
+#                         width=img_width, height=seg_height)
+#             current_x += img_width + 10
+#
+#         # Draw Grad-CAM
+#         if grad_path:
+#             with Image.open(grad_path) as img:
+#                 grad_height = img_width / (img.width / img.height)
+#             c.drawImage(grad_path, current_x, y_pos - grad_height,
+#                         width=img_width, height=grad_height)
+#
+#         c.showPage()
+#
+#     c.save()

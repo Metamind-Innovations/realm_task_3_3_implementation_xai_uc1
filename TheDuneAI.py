@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 import generator
 import lung_extraction_funcs as le
-from xai import generate_gradcam_explanation, generate_combined_report, CMAP_BONE
+from xai import generate_gradcam_explanation, CMAP_BONE
 
 
 class FuzzyXAISelector:
@@ -252,4 +252,5 @@ class ContourPilot:
                 )
                 gradcam_paths.append(gradcam_path)
 
-        generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir)
+        # Removed the combined report generation
+        # generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir)
