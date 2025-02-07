@@ -160,14 +160,16 @@ class ContourPilot:
 
     def _get_explanation_slices(self, volume, segmentation_mask, processing_params):
         """Identify valid slices for XAI explanations."""
-        valid_slices = np.where(np.any(segmentation_mask, axis=(1, 2)))[0]
+        valid_axial = np.where(np.any(segmentation_mask, axis=(1, 2)))[0]
+        valid_coronal = np.where(np.any(segmentation_mask, axis=(0, 2)))[0]
+        valid_sagittal = np.where(np.any(segmentation_mask, axis=(0, 1)))[0]
 
         # Adjust for preprocessing crops
         if 'z_st' in processing_params:
-            valid_slices -= processing_params['z_st']
-            valid_slices = valid_slices[(valid_slices >= 0) & (valid_slices < volume.shape[0])]
+            valid_axial -= processing_params['z_st']
+            valid_axial = valid_axial[(valid_axial >= 0) & (valid_axial < volume.shape[0])]
 
-        return valid_slices[:3]  # Return max 3 slices
+        return valid_axial, valid_coronal, valid_sagittal
 
     def segment(self):
         """Main pipeline execution method."""
@@ -181,11 +183,9 @@ class ContourPilot:
             # Generate segmentation
             segmentation_mask, processed_mask = self._generate_segmentation(volume_array, processing_params)
             output_dir = self._save_results(segmentation_mask, processing_params, file_path)
-            explanation_slices = self._get_explanation_slices(volume_array, segmentation_mask, processing_params)
-
-            if not explanation_slices.size:
-                print(f"No valid slices found for {file_path}")
-                continue
+            axial_expl_slices, coronal_expl_slices, sagittal_expl_slices = self._get_explanation_slices(volume_array,
+                                                                                                        segmentation_mask,
+                                                                                                        processing_params)
 
             # Calculate sensitivity
             sensitivity = np.percentile(volume_array, 95) / 4095  # Normalize to 0-1
@@ -193,64 +193,129 @@ class ContourPilot:
             # Get selected layer from fuzzy logic
             selected_layer = fuzzy_selector.decide(sensitivity)
 
-            # Generate explanations conditionally
+            # Generate explanations
             self._generate_xai_reports(
                 volume_array,
-                explanation_slices,
+                [axial_expl_slices, coronal_expl_slices, sagittal_expl_slices],
                 output_dir,
                 gradcam_layer=f'conv2d_{selected_layer}',
                 processed_mask=processed_mask
             )
 
-    def _generate_xai_reports(self, volume, slice_indices, output_dir, gradcam_layer, processed_mask, use_gradcam=True):
+    # TODO Optimize below function
+    def _generate_xai_reports(self, volume, slice_indices: list, output_dir, gradcam_layer, processed_mask):
         """Generate and save XAI explanations for selected slices."""
         original_paths, gradcam_paths, segmented_paths = [], [], []
+        valid_axial, valid_coronal, valid_sagittal = slice_indices[0], slice_indices[1], slice_indices[2]
 
-        for slice_idx in slice_indices:
-            ct_slice = volume[slice_idx]
-            mask_slice = processed_mask[slice_idx]
+        for idx in tqdm(valid_axial, desc='Generating Axial XAI Images'):
+            ct_trans = volume[idx, :, :]
+            mask_trans = processed_mask[idx, :, :]
 
-            # Save original slice separately
-            orig_path = os.path.join(output_dir, f"original_slice_{slice_idx}.png")
+            # Save original axial slice
+            orig_trans = os.path.join(output_dir, f"original_slice_axial_{idx}.png")
             plt.figure(figsize=(5, 5))
-            plt.imshow(ct_slice, cmap=CMAP_BONE)
-            plt.title('Original Slice')  # Add matching title
+            plt.imshow(ct_trans, cmap=CMAP_BONE)
+            plt.title('Original Transverse Slice')
             plt.axis('off')
-            plt.savefig(orig_path, bbox_inches='tight', dpi=100)  # Match dpi with other images
+            plt.savefig(orig_trans, bbox_inches='tight', dpi=100)
             plt.close()
-            original_paths.append(orig_path)
+            original_paths.append(orig_trans)
 
-            # Generate segmented slice overlay
-            segmented_path = os.path.join(output_dir, f'segmented_slice_{slice_idx}.png')
+            # Save segmented transverse slice
+            seg_axial = os.path.join(output_dir, f"segmented_slice_axial_{idx}.png")
             plt.figure(figsize=(5, 5))
-            plt.imshow(ct_slice, cmap=CMAP_BONE)
-            plt.imshow(mask_slice, cmap='Reds', alpha=0.5)  # Transparent overlay
-            plt.title('Segmented Slice')
+            plt.imshow(ct_trans, cmap=CMAP_BONE)
+            plt.imshow(mask_trans, cmap='Reds', alpha=0.5)
+            plt.title('Segmented Transverse Slice')
             plt.axis('off')
-            plt.savefig(segmented_path, bbox_inches='tight', dpi=100)
+            plt.savefig(seg_axial, bbox_inches='tight', dpi=100)
             plt.close()
-            segmented_paths.append(segmented_path)
+            segmented_paths.append(seg_axial)
 
-            # slice_metrics = {}
-            # lime_path = None
-            gradcam_path = None
+            # Generate Grad-CAM for Transverse plane
+            grad_axial = generate_gradcam_explanation(
+                self.model,
+                ct_trans,
+                output_dir,
+                f"axial_slice_{idx}",
+                layer_name=gradcam_layer
+            )
+            gradcam_paths.append(grad_axial)
 
-            # if use_lime:
-            #     slice_metrics, lime_path = generate_lime_explanations(
-            #         self.model, ct_slice, lung_mask, f"slice_{slice_idx}", output_dir
-            #     )
-            #     lime_paths.append(lime_path)
-            #     metrics.append(slice_metrics)
+        for idx in tqdm(valid_sagittal, desc='Generating Sagittal XAI Images'):
+            ct_sagittal = volume[:, :, idx]
+            ct_sagittal = cv2.resize(ct_sagittal, (512, 512))  # Add resizing
+            ct_sagittal = np.flipud(ct_sagittal)
+            mask_sagittal = processed_mask[:, :, idx]
+            mask_sagittal = np.flipud(mask_sagittal)
+            mask_sagittal = cv2.resize(mask_sagittal.astype(np.float32), (512, 512)) > 0.5
 
-            if use_gradcam:
-                gradcam_path = generate_gradcam_explanation(
-                    self.model,
-                    ct_slice,
-                    output_dir,
-                    f"slice_{slice_idx}",
-                    layer_name=gradcam_layer
-                )
-                gradcam_paths.append(gradcam_path)
+            # Save visualization: use aspect='auto' so matplotlib won’t force a square plot.
+            orig_sag_path = os.path.join(output_dir, f"original_slice_sagittal_{idx}.png")
+            plt.figure(figsize=(5,5))
+            plt.imshow(ct_sagittal, cmap=CMAP_BONE)
+            plt.title('Original Sagittal Slice')
+            plt.axis('off')
+            plt.savefig(orig_sag_path, bbox_inches='tight', dpi=100)
+            plt.close()
+            original_paths.append(orig_sag_path)
 
-        # Removed the combined report generation
-        # generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir)
+            seg_sag_path = os.path.join(output_dir, f"segmented_slice_sagittal_{idx}.png")
+            plt.figure(figsize=(5,5))
+            plt.imshow(ct_sagittal, cmap=CMAP_BONE)
+            plt.imshow(mask_sagittal, cmap='Reds', alpha=0.5)
+            plt.title('Segmented Sagittal Slice')
+            plt.axis('off')
+            plt.savefig(seg_sag_path, bbox_inches='tight', dpi=100)
+            plt.close()
+            segmented_paths.append(seg_sag_path)
+
+            grad_sag = generate_gradcam_explanation(
+                self.model,
+                ct_sagittal,
+                output_dir,
+                f"sagittal_slice_{idx}",
+                layer_name=gradcam_layer
+            )
+            gradcam_paths.append(grad_sag)
+
+        for idx in tqdm(valid_coronal, desc='Generating Coronal XAI Images'):
+            ct_coronal = volume[:, idx, :]
+            ct_coronal = cv2.resize(ct_coronal, (512, 512))  # Ensure resizing
+            ct_coronal = np.flipud(ct_coronal)
+            mask_coronal = processed_mask[:, idx, :]
+            mask_coronal = np.flipud(mask_coronal)
+            mask_coronal = cv2.resize(mask_coronal.astype(np.float32), (512, 512)) > 0.5
+
+            ct_coronal = np.squeeze(ct_coronal)
+            if len(ct_coronal.shape) == 3:
+                ct_coronal = cv2.resize(ct_coronal, (512, 512))
+
+            orig_cor_path = os.path.join(output_dir, f"original_slice_coronal_{idx}.png")
+            plt.figure(figsize=(5,5))
+            plt.imshow(ct_coronal, cmap=CMAP_BONE)
+            plt.title('Original Coronal Slice')
+            plt.axis('off')
+            plt.savefig(orig_cor_path, bbox_inches='tight', dpi=100)
+            plt.close()
+            original_paths.append(orig_cor_path)
+
+            seg_cor_path = os.path.join(output_dir, f"segmented_slice_coronal_{idx}.png")
+            plt.figure(figsize=(5,5))
+            plt.imshow(ct_coronal, cmap=CMAP_BONE)
+            plt.imshow(mask_coronal, cmap='Reds', alpha=0.5)
+            plt.title('Segmented Coronal Slice')
+            plt.axis('off')
+            plt.savefig(seg_cor_path, bbox_inches='tight', dpi=100)
+            plt.close()
+            segmented_paths.append(seg_cor_path)
+
+            grad_cor = generate_gradcam_explanation(
+                self.model,
+                ct_coronal,
+                output_dir,
+                f"coronal_slice_{idx}",
+                layer_name=gradcam_layer
+            )
+            gradcam_paths.append(grad_cor)
