@@ -86,20 +86,11 @@ def _save_lime_visualization(lime_image, mask, output_dir, filename):
     return path
 
 
-def generate_gradcam_explanation(model, input_slice, output_dir, filename, lung_mask=None, layer_name=None):
+def generate_gradcam_explanation(model, input_slice, output_dir, filename, lung_mask=None):
     """Generate Grad-CAM explanation with automatic layer selection."""
-    # Auto-select layer if not specified
+    layer_name = next((layer for layer in GRADCAM_LAYER_NAMES if layer in [l.name for l in model.layers]), None)
     if layer_name is None:
-        for candidate_layer in GRADCAM_LAYER_NAMES:
-            try:
-                # Just check if layer exists, don't create full model yet
-                model.get_layer(candidate_layer)
-                layer_name = candidate_layer
-                break
-            except ValueError:
-                continue
-        if layer_name is None:
-            raise ValueError("No valid Grad-CAM layer found in model")
+        raise ValueError("No valid Grad-CAM layer found in model")
 
     # Create gradient model - SINGLE CREATION POINT
     grad_model = tf.keras.models.Model(

@@ -9,6 +9,7 @@ import numpy as np
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
 from tqdm import tqdm
+from pathlib import Path
 
 import generator
 import lung_extraction_funcs as le
@@ -142,9 +143,9 @@ class ContourPilot:
 
     def _save_results(self, segmentation_mask, processing_params, source_file_path):
         """Save segmentation results and original image to NRRD format."""
-        patient_id = source_file_path.split('\\')[-2]
-        output_dir = os.path.join(self.output_path, f'{patient_id}_(DL)')
-        os.makedirs(output_dir, exist_ok=True)
+        patient_id = Path(source_file_path).parent.name
+        output_dir = Path(self.output_path) / f"{patient_id}_(DL)"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Save segmentation mask
         sitk_mask = sitk.GetImageFromArray(segmentation_mask)
