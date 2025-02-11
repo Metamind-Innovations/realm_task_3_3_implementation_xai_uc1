@@ -1,7 +1,6 @@
 fairlearn
 imbalanced_learn==0.12.4
 keras
-lime==0.2.0.1
 matplotlib==3.7.5
 numpy
 opencv_python==4.11.0.86

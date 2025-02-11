@@ -1,5 +1,21 @@
 # realm_task_3_3_implementation_xai
 
+## Task Description
+
+This repository implements an automated pipeline for 3D lung segmentation with integrated XAI (Explainable AI) capabilities, optimized for CT imaging analysis, utilizing DuneAI, and combining fuzzy logic-driven methodology selection with Grad-CAM visual explanations.
+
+Key Components:
+
+1. **Adaptive XAI Framework:**
+   1. Implements Grad-CAM visualization with automatic layer selection through fuzzy logic. The `sensitivity [0-1]` variable determines the actual gradcam layer and threshold for the generation of masked slices.
+   2. Sensitivity-based threshold adjustment using a fuzzy control system
+   3. Batch processing of 3D volues with slice-wise Grad-CAM overlays for each slice (axial, sagittal and coronal)
+2. **NCLSC-Radiomics Dataset Integration**
+   1. Preprocesses the DICOM dataset and convert it to .nrrd files
+   2. Uses the converted files to produce a segmentation mask and xai Grad-CAM results
+   3. Outputs Original Slices, Segmented Slices and multi planar Grad-CAM slices for each patient, for each 3D dimension
+   4. Saves output slices as .png images for easier visualization
+
 ## Prerequisites
 
 1. In order for the packages inside `requirements.txt` to be installed successfully, you need to have
@@ -27,11 +43,8 @@ We will use `batch_segmentation.py` for this.
 
 ## Fairness and Bias metrics
 
-For this task we use the `bias_fairness.py` script. This script generates metrics such as **Equalized Odds Difference**
-between gender groups and **Demographic Parity**.
-It also generates the **Top 5 Predictive Features** DataFrame which shows how each feature contributes to the model's
-predictions.
-(E.g. If a feature `age` has an `odds_ratio` of `1.03` then that means that each year increases mortality risk by `3%`).
-A `report.pdf` file is also created containing all the metrics and 2 confusion matrices for better comprehension.
+**Note:** Fairness and bias cannot be implemented for the current task, which focuses on generating a segmentation mask and a Grad-CAM heatmap.
+Quantitative analysis of fairness and bias requires:
 
-In order to change the dataset, modify the `csv_path` variable in the `bias_fairness.py` script (line 178).
+1. Subpopulations/subgroups to be detected on a model level.
+2. Some patients to not have tumors detected, so the fairness/bias model can distinguish between combinations of positive or negative classifications on each subgroup

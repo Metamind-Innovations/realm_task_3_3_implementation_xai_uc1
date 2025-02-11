@@ -1,60 +1,11 @@
-import time
-
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-from PIL import Image
-from lime import lime_image
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from skimage.segmentation import mark_boundaries
 
 # Visualization constants
 CMAP_BONE = 'bone'
-FONT_NAME = 'Helvetica'
-FONT_BOLD = 'Helvetica-Bold'
 GRADCAM_LAYER_NAMES = ['conv2d_22', 'conv2d_19', 'conv2d_16', 'conv2d_13']  # Optimal layers from U-Net decoder
-
-
-def generate_lime_explanations(model, img_slice, lung_mask, filename, output_dir):
-    """Generate LIME explanations for a single slice."""
-    # Normalize image
-    img_normalized = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
-    img_rgb = np.stack([img_normalized] * 3, axis=-1)
-
-    # Create explainer and prediction function
-    explainer = lime_image.LimeImageExplainer(random_state=42)
-    batch_predict = lambda images: _lime_predict(model, images, lung_mask)
-
-    # Generate explanation
-    explanation = explainer.explain_instance(
-        img_rgb,
-        batch_predict,
-        top_labels=1,
-        hide_color=0,
-        num_samples=100
-    )
-
-    # Process results
-    image, mask = explanation.get_image_and_mask(
-        explanation.top_labels[0], positive_only=False, num_features=5, hide_rest=False
-    )
-
-    # Calculate metrics
-    metrics = _calculate_metrics(mask, lung_mask, explanation)
-
-    # Save visualizations
-    lime_path = _save_lime_visualization(image, mask, output_dir, filename)
-
-    return metrics, lime_path
-
-
-def _lime_predict(model, images, lung_mask):
-    """Helper function for LIME predictions."""
-    grayscale = images[..., 0].reshape(-1, 512, 512, 1)
-    masked = grayscale * lung_mask[..., np.newaxis]
-    return np.mean(model.predict(masked), axis=(1, 2))
 
 
 def _calculate_metrics(mask, lung_mask, explanation):
@@ -72,18 +23,6 @@ def _calculate_metrics(mask, lung_mask, explanation):
                     ((intersection / (np.sum(lung_mask) + 1e-8)) +
                      (intersection / (np.sum(mask) + 1e-8)) + 1e-8)
     }
-
-
-def _save_lime_visualization(lime_image, mask, output_dir, filename):
-    """Save LIME explanation visualization."""
-    path = f"{output_dir}/lime_{filename}.png"
-    plt.figure(figsize=(5, 5))
-    plt.imshow(mark_boundaries(lime_image, mask))
-    plt.title('LIME Explanation')
-    plt.axis('off')
-    plt.savefig(path, bbox_inches='tight', dpi=100)
-    plt.close()
-    return path
 
 
 def generate_gradcam_explanation(model, input_slice, output_dir, filename, lung_mask=None, layer_name=None):
@@ -145,13 +84,6 @@ def _compute_heatmap(grad_model, img_array, eps=1e-8):
     return heatmap
 
 
-def _normalize_to_rgb(img_slice):
-    """Convert slice to normalized RGB format."""
-    normalized = ((img_slice - img_slice.min()) /
-                  (img_slice.max() - img_slice.min()) * 255).astype(np.uint8)
-    return np.stack([normalized] * 3, axis=-1)
-
-
 def _overlay_heatmap(heatmap, background, alpha=0.4):
     """Overlay heatmap on background image."""
     heatmap = cv2.resize(heatmap, (background.shape[1], background.shape[0]))
@@ -171,52 +103,3 @@ def _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, laye
     plt.savefig(path, bbox_inches='tight', dpi=100)
     plt.close()
     return path
-
-# Commented out below code is for generating combined report
-#
-# def generate_combined_report(original_paths, segmented_paths, gradcam_paths, output_dir):
-#     """Generate combined XAI report with all explanations in one PDF."""
-#     pdf_path = f"{output_dir}/XAI_Combined_Report.pdf"
-#     c = canvas.Canvas(pdf_path, pagesize=letter)
-#
-#     # Image positions
-#     img_width = 180
-#     y_pos = 550
-#
-#     # Title Page
-#     c.setFont(FONT_BOLD, 18)
-#     c.drawString(50, 750, "Combined XAI Report")
-#     c.setFont(FONT_NAME, 12)
-#     c.drawString(50, 720, f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-#     c.showPage()
-#
-#     for orig_path, seg_path, grad_path in zip(original_paths, segmented_paths, gradcam_paths):
-#         current_x = 20
-#
-#         # Draw Original Slice
-#         if orig_path:
-#             with Image.open(orig_path) as img:
-#                 aspect_ratio = img.width / img.height
-#                 img_height = img_width / aspect_ratio
-#             c.drawImage(orig_path, current_x, y_pos - img_height,
-#                         width=img_width, height=img_height)
-#             current_x += img_width + 10
-#
-#         # Draw Segmented Slice (middle)
-#         if seg_path:
-#             with Image.open(seg_path) as img:
-#                 seg_height = img_width / (img.width / img.height)
-#             c.drawImage(seg_path, current_x, y_pos - seg_height,
-#                         width=img_width, height=seg_height)
-#             current_x += img_width + 10
-#
-#         # Draw Grad-CAM
-#         if grad_path:
-#             with Image.open(grad_path) as img:
-#                 grad_height = img_width / (img.width / img.height)
-#             c.drawImage(grad_path, current_x, y_pos - grad_height,
-#                         width=img_width, height=grad_height)
-#
-#         c.showPage()
-#
-#     c.save()
