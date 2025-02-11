@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 
 import SimpleITK as sitk
 import cv2
@@ -9,7 +10,6 @@ import numpy as np
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
 from tqdm import tqdm
-from pathlib import Path
 
 import generator
 import lung_extraction_funcs as le
@@ -21,7 +21,10 @@ class FuzzyXAISelector:
         # Input variables
         self.sensitivity = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'sensitivity')
 
-        # Output as gradcam layer
+        # Consequent for threshold
+        self.seg_threshold = ctrl.Consequent(np.arange(0.5, 1.05, 0.05), 'seg_threshold')
+
+        # Consequent for gradcam layer
         self.gradcam_layer = ctrl.Consequent(np.arange(16, 23, 1), 'gradcam_layer', defuzzify_method='centroid')
 
         # Membership functions
@@ -36,9 +39,13 @@ class FuzzyXAISelector:
         self.sensitivity['medium'] = fuzz.trimf(self.sensitivity.universe, [0.3, 0.5, 0.7])
         self.sensitivity['high'] = fuzz.trimf(self.sensitivity.universe, [0.5, 1, 1])
 
+        # Threshold membership functions
+        self.seg_threshold['high'] = fuzz.trimf(self.seg_threshold.universe, [0.8, 1.0, 1.0])
+        self.seg_threshold['medium'] = fuzz.trimf(self.seg_threshold.universe, [0.65, 0.75, 0.85])
+        self.seg_threshold['low'] = fuzz.trimf(self.seg_threshold.universe, [0.5, 0.5, 0.65])
+
         # Layer selection
-        layers = [16, 17, 18, 19, 20, 21, 22]
-        for layer in layers:
+        for layer in range(16, 23):
             self.gradcam_layer[f'conv{layer}'] = fuzz.trimf(
                 self.gradcam_layer.universe,
                 [layer - 0.5, layer, layer + 0.5]
@@ -46,15 +53,26 @@ class FuzzyXAISelector:
 
     def _create_rules(self):
         self.rules = [
-            ctrl.Rule(self.sensitivity['low'], self.gradcam_layer['conv16']),
-            ctrl.Rule(self.sensitivity['medium'], self.gradcam_layer['conv19']),
-            ctrl.Rule(self.sensitivity['high'], self.gradcam_layer['conv22'])
+            ctrl.Rule(
+                self.sensitivity['low'],
+                (self.gradcam_layer['conv16'], self.seg_threshold['high'])
+            ),
+            ctrl.Rule(
+                self.sensitivity['medium'],
+                (self.gradcam_layer['conv19'], self.seg_threshold['medium'])
+            ),
+            ctrl.Rule(
+                self.sensitivity['high'],
+                (self.gradcam_layer['conv22'], self.seg_threshold['low'])
+            )
         ]
 
     def decide(self, sensitivity):
         self.decision_maker.input['sensitivity'] = sensitivity
         self.decision_maker.compute()
-        return int(round(self.decision_maker.output['gradcam_layer']))
+        selected_layer = int(round(self.decision_maker.output['gradcam_layer']))
+        dynamic_threshold = round(self.decision_maker.output['seg_threshold'], 2)
+        return {"gradcam_layer": selected_layer, "seg_threshold": dynamic_threshold}
 
 
 class ContourPilot:
@@ -94,8 +112,11 @@ class ContourPilot:
         model.load_weights(model_weights_path)
         return model
 
-    def _generate_segmentation(self, input_volume, processing_params, threshold=0.99):
+    def _generate_segmentation(self, input_volume, processing_params, threshold=None):
         """Generate 3D segmentation mask using the loaded model."""
+        if threshold is None:
+            threshold = 0.99
+
         if self.verbosity:
             print(f'Starting segmentation for volume of shape {input_volume.shape}...')
             timer_start = time.time()
@@ -181,18 +202,24 @@ class ContourPilot:
             processing_params = params[0]
             file_path = file_path[0]
 
+            # Calculate sensitivity. This can be an input parameter in the range of [0,1]
+            # sensitivity = float(input('Enter sensitivity (0-1): '))
+            sensitivity = np.percentile(volume_array, 95) / 4095  # Normalize to 0-1
+            print(f'Sensitivity: {sensitivity}')
+
+            # Get both parameters from fuzzy system
+            fuzzy_params = fuzzy_selector.decide(sensitivity)
+            selected_layer = fuzzy_params['gradcam_layer']
+            dynamic_threshold = fuzzy_params['seg_threshold']
+            print(f'Selected layer: {selected_layer}, dynamic threshold: {dynamic_threshold}')
+
             # Generate segmentation
-            segmentation_mask, processed_mask = self._generate_segmentation(volume_array, processing_params)
+            segmentation_mask, processed_mask = self._generate_segmentation(volume_array, processing_params, threshold=dynamic_threshold)
             output_dir = self._save_results(segmentation_mask, processing_params, file_path)
             axial_expl_slices, coronal_expl_slices, sagittal_expl_slices = self._get_explanation_slices(volume_array,
                                                                                                         segmentation_mask,
                                                                                                         processing_params)
 
-            # Calculate sensitivity
-            sensitivity = np.percentile(volume_array, 95) / 4095  # Normalize to 0-1
-
-            # Get selected layer from fuzzy logic
-            selected_layer = fuzzy_selector.decide(sensitivity)
 
             # Generate explanations
             self._generate_xai_reports(
@@ -219,11 +246,15 @@ class ContourPilot:
                 elif plane == 'sagittal':
                     ct_slice = np.flipud(cv2.resize(volume[:, :, idx], (512, 512)))
                     mask_slice = cv2.resize(np.flipud(processed_mask[:, :, idx]).astype(np.float32),
-                                            (512, 512)) > 0.5
+                                            (512, 512)) > 0.3
                 else:  # coronal
                     ct_slice = np.flipud(cv2.resize(volume[:, idx, :], (512, 512)))
                     mask_slice = cv2.resize(np.flipud(processed_mask[:, idx, :]).astype(np.float32),
-                                            (512, 512)) > 0.5
+                                            (512, 512)) > 0.3
+
+                # No segmentation detected for this slice
+                if np.sum(mask_slice) == 0:
+                    continue
 
                 # Save original slice
                 plt.figure(figsize=(5, 5))
@@ -235,9 +266,10 @@ class ContourPilot:
                 plt.close()
 
                 # Save segmented slice
+                masked_mask = np.ma.masked_where(mask_slice == 0, mask_slice)
                 plt.figure(figsize=(5, 5))
                 plt.imshow(ct_slice, cmap=CMAP_BONE)
-                plt.imshow(mask_slice, cmap='Reds', alpha=0.5)
+                plt.imshow(masked_mask, cmap='Reds', alpha=1.0, norm=plt.Normalize(vmin=0, vmax=1))
                 plt.title(f'Segmented {plane.capitalize()} Slice')
                 plt.axis('off')
                 seg_path = os.path.join(output_dir, f"segmented_slice_{plane}_{idx}.png")
