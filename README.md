@@ -41,6 +41,8 @@ We will use `batch_segmentation.py` for this.
 1. Modify `model_path`, `path_to_test_data` and `save_path` according to your needs.
 2. Run the script in order to begin the segmentation and xai generation process.
 
+**Example:** `python batch_segmentation.py --model_path ./model_files --path_to_test_data ./converted_nrrds --save_path ./output_segmentations --sensitivity 0.7`
+
 ## Fairness and Bias metrics
 
 **Note:** Fairness and bias cannot be implemented for the current task, which focuses on generating a segmentation mask and a Grad-CAM heatmap.

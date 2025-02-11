@@ -1,15 +1,28 @@
 from TheDuneAI import ContourPilot
+import argparse
 
-# If a CUDA GPU is available, it is used automatically by tensorflow
+def main():
+    # Argument parser
+    parser = argparse.ArgumentParser(description='Run lung segmentation and xai image heatmap generation with Grad-CAM')
+    parser.add_argument('--model_path', required=True,
+                        help='Path to model directory containing model_v7.json and weights_v7.hdf5')
+    parser.add_argument('--path_to_test_data', required=True, help='Path to input NRRD files directory')
+    parser.add_argument('--save_path', required=True, help='Output directory for segmentation/xai results')
+    parser.add_argument('--sensitivity', type=float, default=0.5,
+                        help='Sensitivity parameter (0.0-1.0). Higher values increase detection sensitivity')
 
-# Model inputs
-model_path = r'./model_files/'  # path to the model files
-path_to_test_data = r'./converted_nrrds'  # path to the input data that will be segmented (nrrds)
-save_path = r'./output_segmentations_radiomics'  # path for the output files (nrrds)
+    args = parser.parse_args()
 
-# initialize the model
-model = ContourPilot(model_path, path_to_test_data, save_path,
-                     verbosity=True)  # set verbosity=True to see what is going on
+    model = ContourPilot(
+        model_path=args.model_path,
+        data_path=args.path_to_test_data,
+        output_path=args.save_path,
+        verbosity=True
+    )
 
-# Start the segmentation process
-model.segment()
+    # Run segmentation/xai process
+    # If a CUDA GPU is available, it is used automatically by tensorflow
+    model.segment()
+
+if __name__=='__main__':
+    main()
