@@ -19,4 +19,5 @@ SimpleITK==2.4.1
 scikit-image
 statsmodels==0.14.1
 tensorflow==2.10.0
+protobuf<3.20
 tqdm==4.67.1
