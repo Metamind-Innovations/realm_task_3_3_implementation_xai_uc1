@@ -1,15 +1,20 @@
 # realm_task_3_3_implementation_xai
 
-## Task Description
+## General Description
 
-This repository implements an automated pipeline for 3D lung segmentation with integrated XAI (Explainable AI) capabilities, optimized for CT imaging analysis, utilizing DuneAI, and combining fuzzy logic-driven methodology selection with Grad-CAM visual explanations.
+Components developed in Task 3.3 aim to implement agnostic XAI techniques on top of AI models that are used for various tasks such as classification or segmentation.
+We aim to implement **two** XAI techniques per Use Case, implement bias and fairness metrics based on model outputs and extract outputs in a digestible manner (images, metrics, etc.)
+
+## Task Specific Description
+
+This repository implements an automated pipeline for 3D lung segmentation with integrated XAI capabilities, optimized for CT imaging analysis, utilizing DuneAI, and combining fuzzy logic-driven methodology selection with Grad-CAM visual explanations.
 
 Key Components:
 
 1. **Adaptive XAI Framework:**
    1. Implements Grad-CAM visualization with automatic layer selection through fuzzy logic. The `sensitivity [0-1]` variable determines the actual gradcam layer and threshold for the generation of masked slices.
    2. Sensitivity-based threshold adjustment using a fuzzy control system
-   3. Batch processing of 3D volues with slice-wise Grad-CAM overlays for each slice (axial, sagittal and coronal)
+   3. Batch processing of 3D volumes with slice-wise Grad-CAM overlays for each slice (axial, sagittal and coronal)
 2. **NCLSC-Radiomics Dataset Integration**
    1. Preprocesses the DICOM dataset and convert it to .nrrd files
    2. Uses the converted files to produce a segmentation mask and xai Grad-CAM results
