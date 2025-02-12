@@ -5,28 +5,15 @@ import tensorflow as tf
 
 # Visualization constants
 CMAP_BONE = 'bone'
-GRADCAM_LAYER_NAMES = ['conv2d_22', 'conv2d_19', 'conv2d_16', 'conv2d_13']  # Optimal layers from U-Net decoder
-
-
-def _calculate_metrics(mask, lung_mask, explanation):
-    """Calculate XAI metrics."""
-    intersection = np.sum(mask * lung_mask)
-    union = np.sum(mask) + np.sum(lung_mask) - intersection
-
-    return {
-        "confidence": np.max(explanation.score),
-        "iou": intersection / (union + 1e-8),
-        "recall": intersection / (np.sum(lung_mask) + 1e-8),
-        "precision": intersection / (np.sum(mask) + 1e-8),
-        "f1_score": 2 * (intersection / (np.sum(lung_mask) + 1e-8)) *
-                    (intersection / (np.sum(mask) + 1e-8)) /
-                    ((intersection / (np.sum(lung_mask) + 1e-8)) +
-                     (intersection / (np.sum(mask) + 1e-8)) + 1e-8)
-    }
+GRADCAM_LAYER_NAMES = ['conv2d_22', 'conv2d_19', 'conv2d_16', 'conv2d_13']
 
 
 def generate_gradcam_explanation(model, input_slice, output_dir, filename, lung_mask=None, layer_name=None):
-    """Generate Grad-CAM explanation with automatic layer selection."""
+    """Generate Grad-CAM visualization with automatic layer selection.
+
+    Raises:
+        ValueError: If no valid convolutional layer is found in model
+    """
     # Auto-select layer if not specified
     if layer_name is None:
         for candidate_layer in GRADCAM_LAYER_NAMES:
@@ -46,18 +33,13 @@ def generate_gradcam_explanation(model, input_slice, output_dir, filename, lung_
         [model.get_layer(layer_name).output, model.output]
     )
 
-    # Prepare input
+    # Prepare input tensor for Grad-CAM computation and calculate heatmap
     input_array = np.expand_dims(input_slice, axis=0)[..., np.newaxis].astype(np.float32)
-
-    # Compute heatmap
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(input_array)
         loss = tf.reduce_mean(predictions)
-
     grads = tape.gradient(loss, conv_outputs)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    # Generate and process heatmap
     heatmap = tf.reduce_sum(conv_outputs[0] * pooled_grads, axis=-1).numpy()
     heatmap = np.maximum(heatmap, 0)
     heatmap /= (heatmap.max() + 1e-8)
@@ -96,7 +78,7 @@ def _save_gradcam_visualization(input_slice, heatmap, output_dir, filename, laye
     """Save Grad-CAM visualization without original slice."""
     path = f"{output_dir}/gradcam_{filename}_{layer_name}.png"
     plt.figure(figsize=(5, 5))
-    plt.imshow(input_slice, cmap=CMAP_BONE)  # Grayscale background
+    plt.imshow(input_slice, cmap=CMAP_BONE)
     plt.imshow(heatmap, cmap='jet', alpha=0.4)  # Transparent heatmap overlay
     plt.title('GRAD-CAM')
     plt.axis('off')

@@ -1,13 +1,14 @@
-import sys
 import lung_extraction_funcs as le
-import os, re, random, time, sys, scipy
+import random
+import sys
+
 import SimpleITK as sitk
-import keras
 import cv2
+import keras
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 from tqdm import tqdm
+
+import lung_extraction_funcs as le
 
 
 class Patient_data_generator(keras.utils.Sequence):
@@ -74,9 +75,8 @@ class Patient_data_generator(keras.utils.Sequence):
             print('-' * 7, 'Img spacing ', sitk.ReadImage(self.patient_dict[filename][0]).GetSpacing(), '-' * 7)
             print('Image shape:', img.shape)
 
-        # print(img.shape,msk.shape)
         # Set minimal values for HU intensities
-        if self.hu_intensity:  # Set lower limit to -1000 HU
+        if self.hu_intensity:  # Set air threshold to -1000 HU (Hounsfield Units)
             img[img < -1000] = -1000
             if self.verbosity:
                 print('Adjust intensity')
@@ -89,7 +89,7 @@ class Patient_data_generator(keras.utils.Sequence):
                 lung_mask_with_tumor_mask = lung_mask.copy()
                 kernel = le.get_kernel()
 
-                ##stretch lung mask if the tumour is outside it, only for training
+                # Stretch lung mask if the tumour is outside it, only for training
                 kernel_sm = cv2.circle(kernel, (3, 3), 4, 1, -1)
                 lung_mask_indicies = np.where(np.sum(lung_mask, axis=(1, 2)) != 0)
                 min_ind_l_mask, max_ind_l_mask = np.min(lung_mask_indicies), np.max(lung_mask_indicies)

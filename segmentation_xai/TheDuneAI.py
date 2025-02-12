@@ -11,14 +11,27 @@ import skfuzzy as fuzz
 from skfuzzy import control as ctrl
 from tqdm import tqdm
 
-import generator
-import lung_extraction_funcs as le
-from xai import generate_gradcam_explanation, CMAP_BONE
+import segmentation_xai.generator as generator
+import segmentation_xai.lung_extraction_funcs as le
+from segmentation_xai.xai import generate_gradcam_explanation, CMAP_BONE
 
 
 class FuzzyXAISelector:
     def __init__(self):
-        # Input variables
+        """
+        Initialize the fuzzy XAI selector.
+
+        The fuzzy system takes in a sensitivity input and outputs both a dynamic threshold
+        and a selected layer for Grad-CAM explanations.
+
+        The fuzzy system is defined as follows:
+
+        * The input variable is `sensitivity`, which ranges from 0 to 1.0 with a step of 0.1.
+        * The consequent variable is `seg_threshold`, which ranges from 0.5 to 1.0 with a step of 0.05.
+        * The consequent variable is `gradcam_layer`, which ranges from 16 to 22 with a step of 1.
+
+        The membership functions are defined in `_define_membership_functions` and the rules are defined in `_create_rules`.
+        """
         self.sensitivity = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'sensitivity')
 
         # Consequent for threshold
@@ -36,13 +49,13 @@ class FuzzyXAISelector:
     def _define_membership_functions(self):
         # Sensitivity levels
         self.sensitivity['low'] = fuzz.trimf(self.sensitivity.universe, [0, 0, 0.5])
-        self.sensitivity['medium'] = fuzz.trimf(self.sensitivity.universe, [0.3, 0.5, 0.7])
-        self.sensitivity['high'] = fuzz.trimf(self.sensitivity.universe, [0.5, 1, 1])
+        self.sensitivity['medium'] = fuzz.trimf(self.sensitivity.universe, [0.5, 0.7, 0.9])
+        self.sensitivity['high'] = fuzz.trimf(self.sensitivity.universe, [0.85, 1.0, 1.0])
 
         # Threshold membership functions
-        self.seg_threshold['high'] = fuzz.trimf(self.seg_threshold.universe, [0.8, 1.0, 1.0])
+        self.seg_threshold['high'] = fuzz.trimf(self.seg_threshold.universe, [0.9, 0.95, 1.0])
         self.seg_threshold['medium'] = fuzz.trimf(self.seg_threshold.universe, [0.65, 0.75, 0.85])
-        self.seg_threshold['low'] = fuzz.trimf(self.seg_threshold.universe, [0.5, 0.5, 0.65])
+        self.seg_threshold['low'] = fuzz.trimf(self.seg_threshold.universe, [0.5, 0.5, 0.6])
 
         # Layer selection
         for layer in range(16, 23):
@@ -54,7 +67,7 @@ class FuzzyXAISelector:
     def _create_rules(self):
         self.rules = [
             ctrl.Rule(
-                self.sensitivity['low'],
+                self.sensitivity['high'],
                 (self.gradcam_layer['conv16'], self.seg_threshold['high'])
             ),
             ctrl.Rule(
@@ -62,12 +75,26 @@ class FuzzyXAISelector:
                 (self.gradcam_layer['conv19'], self.seg_threshold['medium'])
             ),
             ctrl.Rule(
-                self.sensitivity['high'],
+                self.sensitivity['low'],
                 (self.gradcam_layer['conv22'], self.seg_threshold['low'])
             )
         ]
 
     def decide(self, sensitivity):
+        """
+        Decide on the dynamic threshold and Grad-CAM layer based on the input sensitivity.
+
+        Parameters
+        ----------
+        sensitivity : float
+            The sensitivity of the segmentation, a value between 0 and 1.
+
+        Returns
+        -------
+        out : dict
+            A dictionary containing the selected Grad-CAM layer and the dynamic threshold
+            for segmentation.
+        """
         self.decision_maker.input['sensitivity'] = sensitivity
         self.decision_maker.compute()
         selected_layer = int(round(self.decision_maker.output['gradcam_layer']))
@@ -78,11 +105,12 @@ class FuzzyXAISelector:
 class ContourPilot:
     """Main class for medical image segmentation and XAI report generation."""
 
-    def __init__(self, model_path, data_path, output_path='./', verbosity=False, pat_dict=None):
+    def __init__(self, model_path, data_path, sensitivity, output_path='./', verbosity=False, pat_dict=None):
         self.verbosity = verbosity
         self.model = self._load_model(model_path)
         self.patient_dict = pat_dict if pat_dict else le.parse_dataset(data_path, img_only=True)
-        self.output_path = output_path
+        self.output_path = output_path,
+        self.sensitivity = sensitivity
 
         # Initialize data generator with explicit parameter names
         self.patient_generator = generator.Patient_data_generator(
@@ -99,11 +127,11 @@ class ContourPilot:
             size_eval=False,
             verbosity=verbosity,
             reshape=True,
-            img_only=True
+            img_only=True,
         )
 
     def _load_model(self, model_path):
-        """Load Keras model from JSON configuration and weights."""
+        """Load U-Net model v7 with pretrained weights for lung segmentation."""
         model_config_path = os.path.join(model_path, 'model_v7.json')
         model_weights_path = os.path.join(model_path, 'weights_v7.hdf5')
 
@@ -198,13 +226,11 @@ class ContourPilot:
         fuzzy_selector = FuzzyXAISelector()
 
         for volume, _, file_path, params in tqdm(self.patient_generator, desc='Processing patients'):
-            volume_array = np.squeeze(volume[0])  # Remove batch dimension
+            volume_array = np.squeeze(volume[0])
             processing_params = params[0]
             file_path = file_path[0]
 
-            # Calculate sensitivity. This can be an input parameter in the range of [0,1]
-            # sensitivity = float(input('Enter sensitivity (0-1): '))
-            sensitivity = np.percentile(volume_array, 95) / 4095  # Normalize to 0-1
+            sensitivity = float(self.sensitivity)
             print(f'Sensitivity: {sensitivity}')
 
             # Get both parameters from fuzzy system
@@ -214,12 +240,12 @@ class ContourPilot:
             print(f'Selected layer: {selected_layer}, dynamic threshold: {dynamic_threshold}')
 
             # Generate segmentation
-            segmentation_mask, processed_mask = self._generate_segmentation(volume_array, processing_params, threshold=dynamic_threshold)
+            segmentation_mask, processed_mask = self._generate_segmentation(volume_array, processing_params,
+                                                                            threshold=dynamic_threshold)
             output_dir = self._save_results(segmentation_mask, processing_params, file_path)
             axial_expl_slices, coronal_expl_slices, sagittal_expl_slices = self._get_explanation_slices(volume_array,
                                                                                                         segmentation_mask,
                                                                                                         processing_params)
-
 
             # Generate explanations
             self._generate_xai_reports(
@@ -252,7 +278,7 @@ class ContourPilot:
                     mask_slice = cv2.resize(np.flipud(processed_mask[:, idx, :]).astype(np.float32),
                                             (512, 512)) > 0.3
 
-                # No segmentation detected for this slice
+                # No segmentation detected for this slice, skip
                 if np.sum(mask_slice) == 0:
                     continue
 

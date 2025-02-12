@@ -3,16 +3,14 @@ import cv2
 from skimage.measure import label, regionprops
 from scipy.ndimage import measurements
 from skimage.filters import roberts
-from numpy import convolve
 from skimage import measure
 from skimage.segmentation import clear_border
 from scipy import ndimage as ndi
 import os, re
-from statsmodels.tsa.api import ExponentialSmoothing
 from tqdm import tqdm
 
 
-# kreating kernel for morphological transformations
+# creating kernel for morphological transformations
 def get_kernel():
     kernel = np.zeros((11, 11), np.uint8)
     kernel = cv2.circle(kernel, (5, 5), 4, 1, -1)
