@@ -59,3 +59,13 @@ We will use `batch_segmentation.py` for this.
 
 **Example:** `python batch_segmentation.py --model_path ./model_files --path_to_test_data ./converted_nrrds --save_path ./output_segmentations --sensitivity 0.7`
 
+## Docker Instructions
+
+### Create the image
+
+To create the image we navigate to the root folder of the repo and execute: `docker build -t my_image .`
+
+### Run the image
+
+To run the created image run: `docker run lung_segmentation`. If you want to modify the run parameters, such as `model_path` or `sensitivity`, you can use `--model_path <path>` or `--sensitivity <value>`.
+Default values can be found in the `Dockerfile`
