@@ -3,7 +3,6 @@ import numpy as np
 import plotly.graph_objs as go
 import plotly
 import plotly.subplots
-import matplotlib.pyplot as plt
 from statsmodels.stats import multitest
 import os
 import scipy as sp
