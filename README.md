@@ -39,9 +39,11 @@ Key Components:
 
 ## Create the `converted_nrrds` directory
 
-We will use the `data_conversion.py` for this task.
+**Note: This step is optional. Skip this if the dataset is already in nrrd format.**
 
-1. _Optional: Uncomment lines 4-6 in the `data_conversion.py` file in order to download the dataset._
+We will use the `data_conversion.py` for this task. The actual functions used in this `.py` file are in the `pmtool` directory and can be found [here](https://github.com/primakov/precision-medicine-toolbox/tree/master/pmtool) 
+
+1. _Optional: Uncomment lines 4-6 in the `data_conversion.py` file in order to download the dataset, if it is not pre-downloaded_
 2. Define the `parameters` variable, as needed.
 3. _Optional: Look into the description of the dataset using `get_dataset_description()` and perform a quality check
    using `get_quality_checks()`._
