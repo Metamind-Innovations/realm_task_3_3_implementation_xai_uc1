@@ -69,3 +69,19 @@ To create the image we navigate to the root folder of the repo and execute: `doc
 
 To run the created image run: `docker run lung_segmentation`. If you want to modify the run parameters, such as `model_path` or `sensitivity`, you can use `--model_path <path>` or `--sensitivity <value>`.
 Default values can be found in the `Dockerfile`
+
+## Kubeflow Components for Lung Segmentation
+
+kubeflow_components directory contains Kubeflow pipeline components for the lung segmentation and XAI visualization pipeline.
+
+### Components
+
+#### Lung Segmentation Component
+
+The main component that performs lung segmentation and generates XAI visualizations using Grad-CAM.
+
+#### Usage
+
+Compile the component generating the lung_segmentation_component.yaml:
+```bash
+python lung_segmentation_component.py
