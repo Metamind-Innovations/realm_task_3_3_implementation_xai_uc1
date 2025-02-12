@@ -1,0 +1,4 @@
+.idea
+output_segmentations
+model_files/weights_v7.hdf5
+__pycache__
