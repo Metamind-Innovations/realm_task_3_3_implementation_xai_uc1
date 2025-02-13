@@ -83,5 +83,10 @@ The main component that performs lung segmentation and generates XAI visualizati
 #### Usage
 
 Compile the component generating the lung_segmentation_component.yaml:
-```bash
+```
 python lung_segmentation_component.py
+```
+
+## 📜 License & Usage
+
+All rights reserved by MetaMinds Innovations. 
