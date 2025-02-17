@@ -32,10 +32,11 @@ Key Components:
 
 ## Prerequisites
 
-1. In order for the packages inside `requirements.txt` to be installed successfully, you need to have
+1. **Python version must be 3.8.x**
+2. In order for the packages inside `requirements.txt` to be installed successfully, you need to have
    https://rustup.rs/ installed and added to your Path variable. To do this, after installation,
    add `C:\Users\<YourUsername>\.cargo\bin` to your Path system variable.
-2. Unzip `weights_v7.zip` in order to create the `weights_v7.hdf5` file.
+3. Unzip `weights_v7.zip` in order to create the `weights_v7.hdf5` file.
 
 ## Create the `converted_nrrds` directory
 
