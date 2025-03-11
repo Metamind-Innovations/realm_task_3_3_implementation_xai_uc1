@@ -39,22 +39,6 @@ def lung_segmentation(
         window_width: Optional[int] = 1500,
         window_center: Optional[int] = -600,
 ):
-    """
-    Perform lung segmentation and generate XAI visualizations using Grad-CAM
-
-    Args:
-        model_files (Input[Model]): Directory containing model_v7.json and weights_v7.hdf5
-        input_data (Input[Dataset]): Directory containing input NRRD files
-        sensitivity (float): Sensitivity parameter (0.0-1.0) for detection
-        output_results (Output[Dataset]): Directory for output segmentations and visualizations
-        verbosity (bool): Enable/disable verbose output
-        batch_size (int, optional): Batch size for processing
-        window_width (int, optional): CT window width parameter
-        window_center (int, optional): CT window center parameter
-
-    Returns:
-        Output containing segmentation results and XAI visualizations
-    """
     # Configure logging
     logging_level = logging.INFO if verbosity else logging.WARNING
     logging.basicConfig(
@@ -90,10 +74,8 @@ def lung_segmentation(
         logger.warning(f"Error installing system dependencies: {e}")
         logger.warning("Continuing anyway, but this might cause issues later")
 
-    # Create output directory if it doesn't exist
     os.makedirs(output_results.path, exist_ok=True)
 
-    # Import after dependencies are installed
     try:
         logger.info("Importing required modules...")
         from segmentation_xai.TheDuneAI import ContourPilot
@@ -143,8 +125,110 @@ def lung_segmentation(
         raise
 
 
+@kfp.dsl.component(
+    base_image="python:3.8-slim"
+)
+def download_github_files(
+        github_repo_url: str,
+        model_files_path: str,
+        input_data_path: str,
+        model_files: Output[Model],
+        input_data: Output[Dataset]
+):
+    import os
+    import time
+    import urllib.request
+
+    os.makedirs(model_files.path, exist_ok=True)
+    os.makedirs(input_data.path, exist_ok=True)
+    github_repo_url = github_repo_url.strip()
+    print(f"Using cleaned URL: '{github_repo_url}'")
+
+    # Example: https://github.com/Metamind-Innovations/realm_task_3_3_implementation_xai_uc1
+    repo_parts = github_repo_url.split('/')
+    if len(repo_parts) >= 5:
+        user_name = repo_parts[-2]
+        repo_name = repo_parts[-1]
+
+        files_to_download = [
+            # Model files
+            {"url": f"https://raw.githubusercontent.com/{user_name}/{repo_name}/main/{model_files_path}/model_v7.json",
+             "dest": os.path.join(model_files.path, "model_v7.json")},
+
+            # Direct LFS download for weights
+            {"url": f"https://github.com/{user_name}/{repo_name}/raw/main/{model_files_path}/weights_v7.hdf5",
+             "dest": os.path.join(model_files.path, "weights_v7.hdf5")}
+        ]
+
+        # Try to download each file with retries
+        for file_info in files_to_download:
+            url = file_info["url"]
+            dest = file_info["dest"]
+            print(f"Downloading {url} to {dest}")
+
+            for attempt in range(3):
+                try:
+                    urllib.request.urlretrieve(url, dest)
+                    print(f"Successfully downloaded {dest}")
+                    break
+                except Exception as e:
+                    print(f"Download attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                    else:
+                        print(f"Failed to download {url} after 3 attempts")
+
+        with open(os.path.join(input_data.path, "sample.txt"), "w") as f:
+            f.write("This is a placeholder for NRRD data files.\n")
+            f.write("For a real application, download actual data files from the repository.")
+    else:
+        raise ValueError(f"Invalid GitHub URL format: {github_repo_url}")
+
+    print("Model files:")
+    print(os.listdir(model_files.path))
+
+    print("Input data:")
+    print(os.listdir(input_data.path))
+
+
+@kfp.dsl.pipeline(
+    name="Lung Segmentation Pipeline",
+    description="Pipeline for lung segmentation and XAI visualization"
+)
+def lung_segmentation_pipeline(
+        github_repo_url: str,
+        model_files_path: str = "model_files",
+        input_data_path: str = "converted_nrrds",
+        sensitivity: float = 0.7,
+        verbosity: bool = True,
+        batch_size: int = 1,
+        window_width: int = 1500,
+        window_center: int = -600
+):
+    # Download files from GitHub
+    download_task = download_github_files(
+        github_repo_url=github_repo_url,
+        model_files_path=model_files_path,
+        input_data_path=input_data_path
+    )
+
+    segmentation_results = lung_segmentation(
+        model_files=download_task.outputs["model_files"],
+        input_data=download_task.outputs["input_data"],
+        sensitivity=sensitivity,
+        verbosity=verbosity,
+        batch_size=batch_size,
+        window_width=window_width,
+        window_center=window_center
+    )
+
+    return {
+        "segmentation_results": segmentation_results.outputs["output_results"]
+    }
+
+
 if __name__ == "__main__":
     kfp.compiler.Compiler().compile(
-        lung_segmentation,
-        "lung_segmentation_component.yaml"
+        pipeline_func=lung_segmentation_pipeline,
+        package_path="lung_segmentation_pipeline.yaml"
     )
