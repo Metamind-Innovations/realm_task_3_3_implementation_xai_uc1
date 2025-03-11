@@ -212,7 +212,7 @@ def lung_segmentation_pipeline(
         input_data_path=input_data_path
     )
 
-    segmentation_results = lung_segmentation(
+    lung_segmentation_task = lung_segmentation(
         model_files=download_task.outputs["model_files"],
         input_data=download_task.outputs["input_data"],
         sensitivity=sensitivity,
@@ -221,10 +221,6 @@ def lung_segmentation_pipeline(
         window_width=window_width,
         window_center=window_center
     )
-
-    return {
-        "segmentation_results": segmentation_results.outputs["output_results"]
-    }
 
 
 if __name__ == "__main__":
