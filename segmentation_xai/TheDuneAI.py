@@ -109,7 +109,7 @@ class ContourPilot:
         self.verbosity = verbosity
         self.model = self._load_model(model_path)
         self.patient_dict = pat_dict if pat_dict else le.parse_dataset(data_path, img_only=True)
-        self.output_path = output_path,
+        self.output_path = output_path
         self.sensitivity = sensitivity
 
         # Initialize data generator with explicit parameter names
