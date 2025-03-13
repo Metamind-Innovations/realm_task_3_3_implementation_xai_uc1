@@ -73,20 +73,47 @@ Default values can be found in the `Dockerfile`
 
 ## Kubeflow Components for Lung Segmentation
 
-kubeflow_components directory contains Kubeflow pipeline components for the lung segmentation and XAI visualization pipeline.
+The `kubeflow_components/lung_segmentation_component.py` file contains Kubeflow pipeline creation logic for the components of the lung segmentation and XAI visualization, enabling seamless deployment in cloud environments.
 
-### Components
+### Pipeline Explanation
 
-#### Lung Segmentation Component
+The pipeline consists of two main components:
+1. **Data Preparation Component:** Downloads model files, weights, and patient data from a GitHub repository
+2. **Lung Segmentation & XAI Component:** Performs lung segmentation and generates XAI visualizations using Grad-CAM
 
-The main component that performs lung segmentation and generates XAI visualizations using Grad-CAM.
+The pipeline automatically handles dependencies, performs data preprocessing, and generates segmentation results with explainable AI overlays based on user-defined sensitivity parameters.
 
-#### Usage
+### Pipeline Usage
 
-Compile the component generating the lung_segmentation_component.yaml:
-```
-python lung_segmentation_component.py
-```
+Compile the pipeline to generate a deployable YAML file in the root directory: `python kubeflow_components/lung_segmentation_component.py` This will create `lung_segmentation_pipeline.yaml` which can be uploaded to a Kubeflow Pipelines instance.
+
+### Pipeline Parameters
+
+When running the pipeline, you need to specify:
+* **github_repo_url:** URL of the repository containing model files and data (e.g. https://github.com/Metamind-Innovations/realm_task_3_3_implementation_xai_uc1)
+* **sensitivity:** Value between 0.0-1.0 controlling segmentation sensitivity (default: `0.7`)
+* **verbosity:** Enable/disable verbose logging (default: `True`)
+* **branch:** Git branch to use (default: `main`)
+
+### Resource Requirements
+
+The pipeline is configured with the following resource requests and limits:
+
+* **CPU:** 2-4 cores
+* **Memory:** 4-8 GB
+
+Adjust these values in the pipeline definition for your specific environment requirements.
+
+### Accessing the Generated Artifacts
+
+The pipeline stores generated artifacts in MinIO object storage within the Kubeflow namespace. To access these artifacts:
+
+1. Set up port forwarding to the MinIO service by running `kubectl port-forward -n kubeflow svc/minio-service 9000:9000` in a terminal window
+2. Access the MinIO web interface at `http://localhost:9000`
+3. Log in with the default credentials 
+   1. Username: `minio` 
+   2. Password: `minio123`
+4. Navigate to the `mlpipeline` bucket, where you'll find the folders `download-github-files` and `lung-segmentation`, containing the artifacts generated from the respective steps.
 
 ## 📜 License & Usage
 

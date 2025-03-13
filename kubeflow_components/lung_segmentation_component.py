@@ -175,8 +175,8 @@ def download_github_files(
     ]
 )
 def lung_segmentation(
-        model_files: Input[Model],
-        input_data: Input[Dataset],
+        model_files: Input[Model],  # For demo purposes use: https://github.com/Metamind-Innovations/realm_task_3_3_implementation_xai_uc1/tree/main/model_files
+        input_data: Input[Dataset],  # For demo purposes use: https://github.com/Metamind-Innovations/realm_task_3_3_implementation_xai_uc1/tree/main/converted_nrrds
         output_results: Output[Dataset],
         sensitivity: float = 0.7,
         verbosity: bool = True,
