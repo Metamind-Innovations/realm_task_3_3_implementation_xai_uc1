@@ -1,100 +1,218 @@
-import logging
-import os
-from typing import Optional
-
 import kfp
 from kfp.dsl import Dataset, Input, Model, Output
 
 
 @kfp.dsl.component(
     base_image="python:3.8-slim",
-    target_image="lung-segmentation:v1",
+    packages_to_install=["requests"]
+)
+def download_github_files(
+        github_repo_url: str,
+        model_files: Output[Model],
+        input_data: Output[Dataset],
+        branch: str = "main",
+):
+    import os
+    import subprocess
+    import shutil
+    import requests
+    import time
+
+    # Create output directories
+    os.makedirs(model_files.path, exist_ok=True)
+    os.makedirs(input_data.path, exist_ok=True)
+
+    # Install git and git-lfs
+    subprocess.run(["apt-get", "update"], check=True)
+    subprocess.run(["apt-get", "install", "-y", "git", "git-lfs", "curl"], check=True)
+
+    # Configure git for network issues
+    subprocess.run(["git", "config", "--global", "http.postBuffer", "524288000"], check=True)
+    subprocess.run(["git", "config", "--global", "http.lowSpeedLimit", "1000"], check=True)
+    subprocess.run(["git", "config", "--global", "http.lowSpeedTime", "60"], check=True)
+
+    # Initialize git-lfs
+    subprocess.run(["git", "lfs", "install"], check=True)
+
+    # Extract owner and repo from URL
+    parts = github_repo_url.split('/')
+    owner = parts[-2]
+    repo = parts[-1]
+
+    # Create segmentation_xai directory
+    os.makedirs(os.path.join(model_files.path, "segmentation_xai"), exist_ok=True)
+
+    # Download Python module files first
+    files_to_download = [
+        {"url": f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/segmentation_xai/TheDuneAI.py",
+         "dest": os.path.join(model_files.path, "segmentation_xai", "TheDuneAI.py")},
+        {"url": f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/segmentation_xai/xai.py",
+         "dest": os.path.join(model_files.path, "segmentation_xai", "xai.py")},
+        {"url": f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/segmentation_xai/generator.py",
+         "dest": os.path.join(model_files.path, "segmentation_xai", "generator.py")},
+        {"url": f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/segmentation_xai/lung_extraction_funcs.py",
+         "dest": os.path.join(model_files.path, "segmentation_xai", "lung_extraction_funcs.py")},
+        {"url": f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/model_files/model_v7.json",
+         "dest": os.path.join(model_files.path, "model_v7.json")}
+    ]
+
+    # Create empty __init__.py file so segmentation_xai is discoverable
+    with open(os.path.join(model_files.path, "segmentation_xai", "__init__.py"), "w") as f:
+        pass
+
+    # Download regular files
+    for file_info in files_to_download:
+        url = file_info["url"]
+        dest = file_info["dest"]
+
+        # Try up to 3 times with increasing timeouts
+        for attempt in range(3):
+            try:
+                response = requests.get(url, timeout=30 * (attempt + 1))
+                if response.status_code == 200:
+                    with open(dest, "wb") as f:
+                        f.write(response.content)
+                    print(f"Downloaded {url}")
+                    break
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+
+    # Download weights file with curl (LFS file)
+    weights_file = os.path.join(model_files.path, "weights_v7.hdf5")
+    weights_url = f"https://media.githubusercontent.com/media/{owner}/{repo}/main/model_files/weights_v7.hdf5"
+
+    try:
+        print(f"Downloading weights file from: {weights_url}")
+        subprocess.run(
+            ["curl", "-L", "--max-time", "600", "-o", weights_file, weights_url],
+            check=True
+        )
+        print(f"Downloaded weights file: {os.path.getsize(weights_file)} bytes")
+    except subprocess.SubprocessError as e:
+        print(f"Failed to download weights with curl: {str(e)}")
+
+        # Try alternate GitHub LFS URL format
+        try:
+            alt_url = f"https://github.com/{owner}/{repo}/raw/{branch}/model_files/weights_v7.hdf5"
+            print(f"Trying alternate URL: {alt_url}")
+            subprocess.run(
+                ["curl", "-L", "--max-time", "600", "-o", weights_file, alt_url],
+                check=True
+            )
+            print(f"Downloaded weights file: {os.path.getsize(weights_file)} bytes")
+        except subprocess.SubprocessError as e2:
+            print(f"Failed with alternate URL: {str(e2)}")
+
+    # Download patient data from converted_nrrds directory
+    try:
+        print("Attempting to clone repository to copy patient data...")
+        temp_dir = "/tmp/patient_repo"
+
+        # Use sparse checkout to get just the converted_nrrds directory
+        subprocess.run(["git", "clone", "--depth=1", "--filter=blob:none", "--sparse",
+                        github_repo_url, temp_dir], check=True, timeout=300)
+
+        os.chdir(temp_dir)
+        subprocess.run(["git", "sparse-checkout", "set", "converted_nrrds"], check=True)
+
+        # Copy the patient directories
+        patient_src_dir = os.path.join(temp_dir, "converted_nrrds")
+        if os.path.exists(patient_src_dir):
+            for patient in os.listdir(patient_src_dir):
+                src_patient_dir = os.path.join(patient_src_dir, patient)
+                if os.path.isdir(src_patient_dir):
+                    dst_patient_dir = os.path.join(input_data.path, patient)
+                    shutil.copytree(src_patient_dir, dst_patient_dir)
+                    print(f"Copied patient directory: {patient}")
+
+            print(f"Copied patient data from {patient_src_dir} to {input_data.path}")
+        else:
+            print(f"Patient directory not found at: {patient_src_dir}")
+
+    except Exception as e:
+        print(f"Error copying patient data: {str(e)}")
+        # Create placeholder if download fails
+        with open(os.path.join(input_data.path, "sample.nrrd"), "wb") as f:
+            f.write(b"NRRD0001\n# This is a placeholder NRRD file\ntype: float\ndimension: 3\nsizes: 10 10 10\n")
+
+    # List patient directories (for visibility only)
+    print("Patient directories in input_data:")
+    patient_count = 0
+    for item in os.listdir(input_data.path):
+        item_path = os.path.join(input_data.path, item)
+        if os.path.isdir(item_path):
+            patient_count += 1
+            print(f"  Patient: {item}")
+            # List files in patient directory
+            for file in os.listdir(item_path):
+                file_path = os.path.join(item_path, file)
+                if os.path.isfile(file_path):
+                    print(f"    - {file}: {os.path.getsize(file_path)} bytes")
+
+    print(f"Total patient count: {patient_count}")
+
+
+@kfp.dsl.component(
+    base_image="python:3.8-slim",
     packages_to_install=[
-        "keras==2.10.0",
-        "matplotlib==3.7.5",
-        "numpy==1.24.3",
-        "opencv-python==4.11.0.86",
-        "pandas==2.0.3",
-        "plotly==6.0.0",
-        "pydicom",
-        "pyradiomics==3.1.0",
-        "scikit-fuzzy==0.5.0",
-        "scikit-learn==1.3.2",
-        "scipy",
-        "seaborn==0.13.2",
-        "SimpleITK==2.4.1",
-        "statsmodels==0.14.1",
+        "networkx>=2.5",
+        "scikit-image",
+        "h5py",
         "tensorflow==2.10.0",
-        "tqdm==4.67.1",
-        "protobuf<3.20",
+        "keras==2.10.0",
+        "numpy",
+        "matplotlib",
+        "scikit-fuzzy",
+        "SimpleITK",
+        "opencv-python",
+        "scipy",
+        "scikit-learn",
+        "tqdm",
+        "pandas",
+        "protobuf<3.20"
     ]
 )
 def lung_segmentation(
         model_files: Input[Model],
         input_data: Input[Dataset],
-        sensitivity: float,
         output_results: Output[Dataset],
+        sensitivity: float = 0.7,
         verbosity: bool = True,
-        batch_size: Optional[int] = 1,
-        window_width: Optional[int] = 1500,
-        window_center: Optional[int] = -600,
-):
-    # Configure logging
-    logging_level = logging.INFO if verbosity else logging.WARNING
-    logging.basicConfig(
-        level=logging_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    logger = logging.getLogger('lung_segmentation')
+) -> str:
+    import os
+    import sys
+    import subprocess
+    import shutil
 
-    # Validate input parameters
-    if not 0.0 <= sensitivity <= 1.0:
-        raise ValueError(f"Sensitivity must be between 0.0 and 1.0, got {sensitivity}")
-
-    if not os.path.exists(model_files.path):
-        raise FileNotFoundError(f"Model path does not exist: {model_files.path}")
-
-    model_json_path = os.path.join(model_files.path, 'model_v7.json')
-    model_weights_path = os.path.join(model_files.path, 'weights_v7.hdf5')
-
-    if not os.path.exists(model_json_path) or not os.path.exists(model_weights_path):
-        raise FileNotFoundError(
-            f"Required model files not found in {model_files.path}. Need model_v7.json and weights_v7.hdf5")
-
-    if not os.path.exists(input_data.path):
-        raise FileNotFoundError(f"Input data path does not exist: {input_data.path}")
-
-    # Install system dependencies
-    logger.info("Installing system dependencies...")
-    try:
-        import subprocess
-        subprocess.run(["apt-get", "update"], check=True)
-        subprocess.run(["apt-get", "install", "ffmpeg", "libsm6", "libxext6", "-y"], check=True)
-    except subprocess.SubprocessError as e:
-        logger.warning(f"Error installing system dependencies: {e}")
-        logger.warning("Continuing anyway, but this might cause issues later")
-
+    # Create output directory
     os.makedirs(output_results.path, exist_ok=True)
 
+    # Install system dependencies
+    subprocess.run(["apt-get", "update"], check=True)
+    subprocess.run(["apt-get", "install", "ffmpeg", "libsm6", "libxext6", "-y"], check=True)
+
+    # Set up module directory
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.append(current_dir)
+
+    module_dir = os.path.join(current_dir, "segmentation_xai")
+    os.makedirs(module_dir, exist_ok=True)
+
+    with open(os.path.join(module_dir, "__init__.py"), "w") as f:
+        pass
+
+    # Copy module files
+    segmentation_src = os.path.join(model_files.path, "segmentation_xai")
+    if os.path.exists(segmentation_src):
+        for item in os.listdir(segmentation_src):
+            src_file = os.path.join(segmentation_src, item)
+            if os.path.isfile(src_file):
+                shutil.copy2(src_file, os.path.join(module_dir, item))
+
     try:
-        logger.info("Importing required modules...")
         from segmentation_xai.TheDuneAI import ContourPilot
-    except ImportError as e:
-        logger.error(f"Failed to import required modules: {e}")
-        raise
-
-    # Log runtime parameters
-    logger.info("Starting lung segmentation with parameters:")
-    logger.info(f"  - Model path: {model_files.path}")
-    logger.info(f"  - Input data path: {input_data.path}")
-    logger.info(f"  - Output path: {output_results.path}")
-    logger.info(f"  - Sensitivity: {sensitivity}")
-    logger.info(f"  - Batch size: {batch_size}")
-    logger.info(f"  - Window parameters: width={window_width}, center={window_center}")
-
-    try:
-        # Initialize model
-        logger.info("Initializing ContourPilot model...")
         model = ContourPilot(
             model_path=model_files.path,
             data_path=input_data.path,
@@ -103,92 +221,16 @@ def lung_segmentation(
             verbosity=verbosity
         )
 
-        # Run segmentation
-        logger.info("Starting segmentation process...")
         model.segment()
-        logger.info("Segmentation completed successfully")
 
-        # Save metadata about the run
-        with open(os.path.join(output_results.path, 'metadata.txt'), 'w') as f:
-            f.write("Lung Segmentation XAI Pipeline\n")
-            f.write(f"Sensitivity: {sensitivity}\n")
-            f.write(f"Window parameters: width={window_width}, center={window_center}\n")
-            f.write(f"Batch size: {batch_size}\n")
-
-        # Return success
-        return True
+        return "Lung segmentation completed successfully"
 
     except Exception as e:
-        logger.error(f"Error during segmentation: {e}", exc_info=True)
-        with open(os.path.join(output_results.path, 'error_log.txt'), 'w') as f:
-            f.write(f"Error during segmentation: {str(e)}\n")
-        raise
-
-
-@kfp.dsl.component(
-    base_image="python:3.8-slim"
-)
-def download_github_files(
-        github_repo_url: str,
-        model_files_path: str,
-        input_data_path: str,
-        model_files: Output[Model],
-        input_data: Output[Dataset]
-):
-    import os
-    import time
-    import urllib.request
-
-    os.makedirs(model_files.path, exist_ok=True)
-    os.makedirs(input_data.path, exist_ok=True)
-    github_repo_url = github_repo_url.strip()
-    print(f"Using cleaned URL: '{github_repo_url}'")
-
-    # Example: https://github.com/Metamind-Innovations/realm_task_3_3_implementation_xai_uc1
-    repo_parts = github_repo_url.split('/')
-    if len(repo_parts) >= 5:
-        user_name = repo_parts[-2]
-        repo_name = repo_parts[-1]
-
-        files_to_download = [
-            # Model files
-            {"url": f"https://raw.githubusercontent.com/{user_name}/{repo_name}/main/{model_files_path}/model_v7.json",
-             "dest": os.path.join(model_files.path, "model_v7.json")},
-
-            # Direct LFS download for weights
-            {"url": f"https://github.com/{user_name}/{repo_name}/raw/main/{model_files_path}/weights_v7.hdf5",
-             "dest": os.path.join(model_files.path, "weights_v7.hdf5")}
-        ]
-
-        # Try to download each file with retries
-        for file_info in files_to_download:
-            url = file_info["url"]
-            dest = file_info["dest"]
-            print(f"Downloading {url} to {dest}")
-
-            for attempt in range(3):
-                try:
-                    urllib.request.urlretrieve(url, dest)
-                    print(f"Successfully downloaded {dest}")
-                    break
-                except Exception as e:
-                    print(f"Download attempt {attempt + 1} failed: {str(e)}")
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)
-                    else:
-                        print(f"Failed to download {url} after 3 attempts")
-
-        with open(os.path.join(input_data.path, "sample.txt"), "w") as f:
-            f.write("This is a placeholder for NRRD data files.\n")
-            f.write("For a real application, download actual data files from the repository.")
-    else:
-        raise ValueError(f"Invalid GitHub URL format: {github_repo_url}")
-
-    print("Model files:")
-    print(os.listdir(model_files.path))
-
-    print("Input data:")
-    print(os.listdir(input_data.path))
+        import traceback
+        error_message = f"Segmentation failed: {str(e)}\n\n{traceback.format_exc()}"
+        with open(os.path.join(output_results.path, 'error.txt'), 'w') as f:
+            f.write(error_message)
+        return error_message
 
 
 @kfp.dsl.pipeline(
@@ -197,30 +239,27 @@ def download_github_files(
 )
 def lung_segmentation_pipeline(
         github_repo_url: str,
-        model_files_path: str = "model_files",
-        input_data_path: str = "converted_nrrds",
         sensitivity: float = 0.7,
         verbosity: bool = True,
-        batch_size: int = 1,
-        window_width: int = 1500,
-        window_center: int = -600
+        branch: str = "main"
 ):
-    # Download files from GitHub
+    # Download files from GitHub with LFS support
     download_task = download_github_files(
         github_repo_url=github_repo_url,
-        model_files_path=model_files_path,
-        input_data_path=input_data_path
+        branch=branch
     )
 
+    # Perform lung segmentation
     lung_segmentation_task = lung_segmentation(
         model_files=download_task.outputs["model_files"],
         input_data=download_task.outputs["input_data"],
         sensitivity=sensitivity,
-        verbosity=verbosity,
-        batch_size=batch_size,
-        window_width=window_width,
-        window_center=window_center
+        verbosity=verbosity
     )
+    lung_segmentation_task.set_cpu_request("2")
+    lung_segmentation_task.set_cpu_limit("4")
+    lung_segmentation_task.set_memory_request("4G")
+    lung_segmentation_task.set_memory_limit("8G")
 
 
 if __name__ == "__main__":
